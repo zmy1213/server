@@ -28,6 +28,8 @@ docs/LEARNING_ROADMAP.md
 - macOS 自动使用 `kqueue`
 - Windows 自动使用 `IOCP`
 - 提供 Echo Server 示例
+- 提供 HTTP Server 示例
+- 支持最小 HTTP 请求解析和响应生成
 - 支持小根堆定时器
 - 支持空闲连接超时关闭
 
@@ -56,30 +58,35 @@ docs/LEARNING_ROADMAP.md
 │   ├── HIGH_CONCURRENCY.md
 │   └── LEARNING_ROADMAP.md
 ├── examples/
-│   └── echo_server.cpp
+│   ├── echo_server.cpp
+│   └── http_server.cpp
 ├── include/
 │   └── cpp20_server/
-│       └── net/
-│           ├── acceptor.h
-│           ├── buffer.h
-│           ├── channel.h
-│           ├── connection.h
-│           ├── event_loop.h
-│           ├── poller.h
-│           ├── socket.h
-│           ├── timer_queue.h
-│           └── tcp_server.h
+│       ├── net/
+│       │   ├── acceptor.h
+│       │   ├── buffer.h
+│       │   ├── channel.h
+│       │   ├── connection.h
+│       │   ├── event_loop.h
+│       │   ├── poller.h
+│       │   ├── socket.h
+│       │   ├── timer_queue.h
+│       │   └── tcp_server.h
+│       └── protocol/
+│           └── http.h
 ├── src/
-│   └── net/
-│       ├── acceptor.cpp
-│       ├── buffer.cpp
-│       ├── channel.cpp
-│       ├── connection.cpp
-│       ├── event_loop.cpp
-│       ├── poller.cpp
-│       ├── socket.cpp
-│       ├── timer_queue.cpp
-│       └── tcp_server.cpp
+│   ├── net/
+│   │   ├── acceptor.cpp
+│   │   ├── buffer.cpp
+│   │   ├── channel.cpp
+│   │   ├── connection.cpp
+│   │   ├── event_loop.cpp
+│   │   ├── poller.cpp
+│   │   ├── socket.cpp
+│   │   ├── timer_queue.cpp
+│   │   └── tcp_server.cpp
+│   └── protocol/
+│       └── http.cpp
 └── tests/
     └── server_tests.cpp
 ```
@@ -96,6 +103,7 @@ poller       epoll/kqueue/select 的统一事件接口
 socket       跨平台 socket 封装
 timer_queue  小根堆定时器
 tcp_server   TCP 服务器入口，Windows IOCP 也在这里实现
+protocol     HTTP 请求解析和响应生成
 examples     示例程序
 tests        自动化功能测试
 ```
@@ -379,6 +387,51 @@ src/net/tcp_server.cpp
 第 4 个参数：idle_timeout_seconds，0 表示不启用空闲超时
 ```
 
+## 最新代码说明：最小 HTTP Server
+
+这一轮代码完成了第 6 阶段 / 第 13 阶段的第一版：最小 HTTP 协议层和 HTTP Server 示例。
+
+新增能力：
+
+```text
+解析 HTTP 请求行：GET /health HTTP/1.1
+解析 HTTP Header：Host、Content-Length
+解析 HTTP Body：根据 Content-Length 读取 body
+生成 HTTP Response：状态码、Content-Length、Content-Type、Connection
+```
+
+当前示例路由：
+
+```text
+GET  /        返回 hello http
+GET  /health  返回 ok
+POST /echo    返回请求 body
+其他路径       返回 404
+```
+
+相关代码：
+
+```text
+include/cpp20_server/protocol/http.h
+src/protocol/http.cpp
+examples/http_server.cpp
+```
+
+启动 HTTP Server：
+
+```bash
+./build/http_server 0.0.0.0 8080 4 30
+```
+
+用 curl 测试：
+
+```bash
+curl http://127.0.0.1:8080/health
+curl -X POST http://127.0.0.1:8080/echo --data 'hello http'
+```
+
+注意：当前 HTTP 是教学版最小实现，适合理解 HTTP 请求/响应主线。后续要继续增强每个连接的输入缓冲区，专门处理 TCP 半包、粘包和多个请求复用同一个连接。
+
 如果你想先理解为什么这种结构能支撑高并发，可以先看：
 
 ```text
@@ -446,6 +499,12 @@ cmake --build build --config Release
 ./build/echo_server 0.0.0.0 8080
 ```
 
+启动 HTTP Server：
+
+```bash
+./build/http_server 0.0.0.0 8080
+```
+
 指定 worker 线程数：
 
 ```bash
@@ -456,6 +515,12 @@ cmake --build build --config Release
 
 ```bash
 ./build/echo_server 0.0.0.0 8080 4 60
+```
+
+HTTP Server 也支持同样参数：
+
+```bash
+./build/http_server 0.0.0.0 8080 4 30
 ```
 
 本机测试：
@@ -480,6 +545,13 @@ hello server
 
 说明服务器启动成功。
 
+HTTP 本机测试：
+
+```bash
+curl http://127.0.0.1:8080/health
+curl -X POST http://127.0.0.1:8080/echo --data 'hello http'
+```
+
 ### Windows PowerShell
 
 构建：
@@ -502,6 +574,12 @@ cmake --build build --config Release
 .\build\Release\echo_server.exe 0.0.0.0 8080
 ```
 
+启动 HTTP Server：
+
+```powershell
+.\build\Release\http_server.exe 0.0.0.0 8080
+```
+
 指定 worker 线程数：
 
 ```powershell
@@ -512,6 +590,12 @@ cmake --build build --config Release
 
 ```powershell
 .\build\Release\echo_server.exe 0.0.0.0 8080 4 60
+```
+
+HTTP Server 指定 worker 线程数和空闲超时时间：
+
+```powershell
+.\build\Release\http_server.exe 0.0.0.0 8080 4 30
 ```
 
 如果使用单配置生成器，比如 MinGW，也可能是：
@@ -547,7 +631,11 @@ ctest --test-dir build --output-on-failure
 ```text
 TimerQueue 单次定时任务和重复定时任务
 Buffer 基础读写
+HTTP 请求解析
+HTTP 响应生成和路由
 真实 TcpServer 单连接 Echo
+真实 TcpServer HTTP GET /health
+真实 TcpServer HTTP POST /echo
 真实 TcpServer 64 客户端并发 Echo
 空闲连接 1 秒超时关闭
 worker_threads=2 的启动和回显
@@ -567,12 +655,18 @@ warnings-as-errors 严格构建：100% tests passed, 0 tests failed out of 1
 ```text
 [PASS] timer_queue (5 ms)
 [PASS] buffer (0 ms)
-listening on 127.0.0.1:59634 backend=kqueue worker_threads=2
+[PASS] http_parser (0 ms)
+[PASS] http_response_routes (0 ms)
+listening on 127.0.0.1:62535 backend=kqueue worker_threads=2
 [PASS] single_connection_echo (102 ms)
-listening on 127.0.0.1:59637 backend=kqueue worker_threads=4
+listening on 127.0.0.1:62538 backend=kqueue worker_threads=2
+[PASS] http_server_health (102 ms)
+listening on 127.0.0.1:62541 backend=kqueue worker_threads=2
+[PASS] http_server_post_echo (102 ms)
+listening on 127.0.0.1:62544 backend=kqueue worker_threads=4
 [PASS] concurrent_echo (104 ms)
-listening on 127.0.0.1:59704 backend=kqueue worker_threads=2
-[PASS] idle_timeout (1101 ms)
+listening on 127.0.0.1:62611 backend=kqueue worker_threads=2
+[PASS] idle_timeout (1124 ms)
 All tests passed.
 ```
 
@@ -698,13 +792,14 @@ git remote set-url origin git@github.com:zmy1213/server.git
 
 ## 后续开发计划
 
-1. 增加 HTTP 协议解析
+1. 增加每个连接的输入缓冲区，完善 HTTP 半包和粘包处理
 2. 增加异步日志
-3. 增加压测脚本
-4. 增加 Linux 百万连接参数调优文档
-5. 增加 Windows AcceptEx 批量异步接收连接
-6. 增加 GitHub Actions 跨平台构建测试
-7. 增加更大规模并发压测客户端
+3. 增加配置文件
+4. 增加运行指标
+5. 增加压测脚本
+6. 增加 Linux 百万连接参数调优文档
+7. 增加 Windows AcceptEx 批量异步接收连接
+8. 增加 GitHub Actions 跨平台构建测试
 
 ## 当前阶段说明
 

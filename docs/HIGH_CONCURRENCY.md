@@ -929,6 +929,56 @@ TimerQueue 解决“哪些连接太久没动了”
 
 这两个能力要配合起来，服务器才不会被大量空闲或死连接拖垮。
 
+## HTTP 协议层做了什么
+
+Echo Server 只能证明网络层能收发字节。
+
+HTTP Server 多做了一层协议解析：
+
+```text
+TCP 收到一段字节
+        ↓
+解析请求行：GET /health HTTP/1.1
+        ↓
+解析 Header：Host、Content-Length
+        ↓
+根据 Content-Length 读取 Body
+        ↓
+执行业务路由
+        ↓
+生成 HTTP Response
+        ↓
+通过 TcpServer 写回客户端
+```
+
+当前支持：
+
+```text
+GET  /
+GET  /health
+POST /echo
+```
+
+对应代码：
+
+| 功能 | 代码位置 | 说明 |
+| --- | --- | --- |
+| HTTP 请求结构 | [`include/cpp20_server/protocol/http.h`](../include/cpp20_server/protocol/http.h) | `HttpRequest` 保存 method、path、version、headers、body |
+| HTTP 请求解析 | [`src/protocol/http.cpp`](../src/protocol/http.cpp) | `parse_http_request()` 解析请求行、Header 和 Body |
+| HTTP 响应生成 | [`src/protocol/http.cpp`](../src/protocol/http.cpp) | `make_http_response()` 生成状态行、Header 和 Body |
+| 示例 HTTP 路由 | [`src/protocol/http.cpp`](../src/protocol/http.cpp) | `handle_demo_http_request()` 处理 `/`、`/health`、`/echo` |
+| HTTP Server 示例 | [`examples/http_server.cpp`](../examples/http_server.cpp) | 使用 `TcpServer` 承载 HTTP 协议层 |
+
+小白理解：
+
+```text
+TcpServer 负责网络收发
+HTTP 模块负责看懂这些字节是什么意思
+业务代码根据 path 决定返回什么
+```
+
+当前 HTTP 还是最小教学版。真实服务器后续要继续加强输入缓冲区，因为 TCP 可能把一个 HTTP 请求拆成多次到达，也可能把多个 HTTP 请求粘在一起到达。
+
 ## 但是百万连接不只靠代码
 
 要跑到百万连接，还需要系统资源配合。
@@ -970,12 +1020,18 @@ Windows 常见限制：
 tests/server_tests.cpp
 ```
 
-测试做了三件事：
+测试覆盖：
 
 ```text
+TimerQueue 单次和重复定时任务
 验证 Buffer 基础读写是否正确
+验证 HTTP 请求解析
+验证 HTTP 响应生成和示例路由
 启动真实 TcpServer 验证单连接 Echo
+启动真实 TcpServer 验证 HTTP GET /health
+启动真实 TcpServer 验证 HTTP POST /echo
 启动真实 TcpServer 验证 64 个客户端并发 Echo
+验证空闲连接 1 秒超时关闭
 ```
 
 运行命令：
@@ -992,14 +1048,6 @@ ctest --test-dir build --output-on-failure
 默认 macOS kqueue 后端通过
 select 后端通过
 warnings-as-errors 严格构建通过
-```
-
-新增定时器后，测试还覆盖：
-
-```text
-TimerQueue 单次定时任务
-TimerQueue 重复定时任务
-空闲连接 1 秒超时关闭
 ```
 
 这轮测试还发现了一个很典型的事件顺序问题。

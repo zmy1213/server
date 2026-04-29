@@ -328,6 +328,50 @@ HTTP 协议：
 生成 HTTP response
 ```
 
+当前项目状态：HTTP 协议层已经完成第一版。
+
+已经新增：
+
+```text
+HttpRequest
+parse_http_request()
+make_http_response()
+handle_demo_http_request()
+http_server 示例
+```
+
+对应文件：
+
+```text
+include/cpp20_server/protocol/http.h
+src/protocol/http.cpp
+examples/http_server.cpp
+```
+
+当前支持的示例路由：
+
+```text
+GET  /        返回 hello http
+GET  /health  返回 ok
+POST /echo    返回请求 body
+其他路径       返回 404
+```
+
+启动方式：
+
+```bash
+./build/http_server 0.0.0.0 8080 4 30
+```
+
+测试方式：
+
+```bash
+curl http://127.0.0.1:8080/health
+curl -X POST http://127.0.0.1:8080/echo --data 'hello http'
+```
+
+当前还是教学版最小 HTTP：测试用例保证完整请求一次发送。后续要给每个连接增加输入缓冲区，专门处理 TCP 半包、粘包和同一连接上的多个请求。
+
 自定义二进制协议：
 
 ```text
@@ -626,7 +670,9 @@ AcceptEx 可以让接收连接也变成 IOCP 完成事件
 
 Echo Server 只能证明网络层能跑。
 
-下一步可以做 HTTP：
+当前项目状态：这一阶段已经完成第一版。
+
+已经支持：
 
 ```text
 GET /
@@ -650,6 +696,14 @@ hello server
 理解协议解析
 理解请求和响应
 让服务器可以被浏览器和 curl 访问
+```
+
+对应代码：
+
+```text
+include/cpp20_server/protocol/http.h
+src/protocol/http.cpp
+examples/http_server.cpp
 ```
 
 ## 第 14 阶段：测试体系
@@ -692,7 +746,11 @@ tests/server_tests.cpp
 ```text
 TimerQueue 单次定时任务和重复定时任务
 Buffer 基础读写
+HTTP 请求解析
+HTTP 响应生成和路由
 真实 TcpServer 单连接 Echo
+真实 TcpServer HTTP GET /health
+真实 TcpServer HTTP POST /echo
 真实 TcpServer 64 客户端并发 Echo
 空闲连接 1 秒超时关闭
 worker_threads=2 的启动和回显
@@ -898,6 +956,8 @@ macOS kqueue 后端
 Linux epoll 后端代码
 Windows IOCP 主干代码
 Echo Server
+HTTP Server 第一版
+HTTP 请求解析和响应生成第一版
 EventLoop / Channel / Acceptor / Connection 拆分
 多线程 Reactor 第一版
 TimerQueue 小根堆定时器第一版
@@ -910,20 +970,23 @@ TimerQueue 小根堆定时器第一版
 下一步最合理的是：
 
 ```text
-第 6 阶段 / 第 13 阶段：HTTP 协议解析
+补每个连接的输入缓冲区
 ```
 
-也就是先做一个最小 HTTP Server：
+原因是 TCP 是字节流，真实网络里可能出现：
 
 ```text
-GET /
-GET /health
-POST /echo
+一个 HTTP 请求分多次到达
+多个 HTTP 请求粘在一次 recv 里
+请求头到了但 body 还没到
 ```
 
-HTTP 之后，再进入：
+输入缓冲区完善后，再进入：
 
 ```text
+异步日志
+配置文件
+运行指标
 压测
 系统调优
 ```

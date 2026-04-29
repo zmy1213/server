@@ -2,6 +2,7 @@
 #include "cpp20_server/net/socket.h"
 #include "cpp20_server/net/tcp_server.h"
 #include "cpp20_server/net/timer_queue.h"
+#include "cpp20_server/protocol/http.h"
 
 #include <atomic>
 #include <chrono>
@@ -9,13 +10,16 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -41,6 +45,9 @@ using cpp20_server::net::invalid_socket;
 using cpp20_server::net::is_would_block;
 using cpp20_server::net::last_socket_error;
 using cpp20_server::net::socket_t;
+using cpp20_server::protocol::handle_demo_http_request;
+using cpp20_server::protocol::make_http_response;
+using cpp20_server::protocol::parse_http_request;
 
 void expect(bool condition, std::string_view message) {
     if (!condition) {
@@ -178,12 +185,42 @@ std::string recv_exact_or_until_close(socket_t fd, std::size_t expected_bytes) {
     return result;
 }
 
+std::string recv_until_close(socket_t fd) {
+    std::string result;
+    for (;;) {
+        char buffer[4096]{};
+        const auto n = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (n > 0) {
+            result.append(buffer, static_cast<std::size_t>(n));
+            continue;
+        }
+        if (n == 0) {
+            return result;
+        }
+        throw std::system_error(last_socket_error(), "client recv failed");
+    }
+}
+
 std::string echo_once(std::uint16_t port, std::string_view message) {
     socket_t fd = connect_to(port);
     try {
         send_all(fd, message);
         shutdown_write(fd);
         std::string response = recv_exact_or_until_close(fd, message.size());
+        close_socket(fd);
+        return response;
+    } catch (...) {
+        close_socket(fd);
+        throw;
+    }
+}
+
+std::string request_once(std::uint16_t port, std::string_view request) {
+    socket_t fd = connect_to(port);
+    try {
+        send_all(fd, request);
+        shutdown_write(fd);
+        std::string response = recv_until_close(fd);
         close_socket(fd);
         return response;
     } catch (...) {
@@ -206,7 +243,10 @@ bool wait_until_remote_close(socket_t fd) {
 
 class RunningServer {
 public:
-    RunningServer(std::uint16_t port, std::size_t worker_threads, std::uint64_t idle_timeout_seconds = 0)
+    RunningServer(std::uint16_t port,
+                  std::size_t worker_threads,
+                  std::uint64_t idle_timeout_seconds = 0,
+                  TcpServer::MessageCallback callback = {})
         : port_(port) {
         TcpServerOptions options;
         options.host = "127.0.0.1";
@@ -214,9 +254,13 @@ public:
         options.worker_threads = worker_threads;
         options.idle_timeout_seconds = idle_timeout_seconds;
         server_ = std::make_unique<TcpServer>(std::move(options));
-        server_->set_message_callback([](std::string_view message) {
-            return std::string{message};
-        });
+        if (callback) {
+            server_->set_message_callback(std::move(callback));
+        } else {
+            server_->set_message_callback([](std::string_view message) {
+                return std::string{message};
+            });
+        }
 
         thread_ = std::thread([this] {
             try {
@@ -309,6 +353,45 @@ void test_buffer() {
     expect(buffer.empty(), "over-retrieve should clear buffer");
 }
 
+void test_http_parser() {
+    const std::string request =
+        "POST /echo HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: 10\r\n"
+        "\r\n"
+        "hello http";
+    const auto parsed = parse_http_request(request);
+    expect(parsed.has_value(), "http parser should parse complete request");
+    expect(parsed->method == "POST", "http method should be POST");
+    expect(parsed->path == "/echo", "http path should be /echo");
+    expect(parsed->version == "HTTP/1.1", "http version should be HTTP/1.1");
+    expect(parsed->headers.at("host") == "localhost", "http host header should be parsed");
+    expect(parsed->body == "hello http", "http body should match content-length");
+
+    const auto incomplete = parse_http_request("GET /health HTTP/1.1\r\nHost: localhost\r\n");
+    expect(!incomplete.has_value(), "http parser should wait for complete header");
+}
+
+void test_http_response_routes() {
+    const std::string health_response = handle_demo_http_request(
+        "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(health_response.find("HTTP/1.1 200 OK\r\n") == 0, "GET /health should return 200");
+    expect(health_response.find("ok\n") != std::string::npos, "GET /health body should be ok");
+
+    const std::string echo_response = handle_demo_http_request(
+        "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello");
+    expect(echo_response.find("HTTP/1.1 200 OK\r\n") == 0, "POST /echo should return 200");
+    expect(echo_response.find("\r\n\r\nhello") != std::string::npos, "POST /echo should echo body");
+
+    const std::string missing_response = handle_demo_http_request(
+        "GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(missing_response.find("HTTP/1.1 404 Not Found\r\n") == 0, "unknown route should return 404");
+
+    const std::string raw_response = make_http_response(201, "Created", "created\n");
+    expect(raw_response.find("Content-Length: 8\r\n") != std::string::npos,
+           "http response should include content length");
+}
+
 void test_single_connection_echo() {
     // 集成测试：启动一个真实 TcpServer，客户端发一条消息，要求原样返回。
     const std::uint16_t port = find_free_loopback_port();
@@ -317,6 +400,39 @@ void test_single_connection_echo() {
     const std::string message = "single-echo-test\n";
     const std::string response = echo_once(port, message);
     expect(response == message, "single connection echo response mismatch");
+}
+
+void test_http_server_health() {
+    const std::uint16_t port = find_free_loopback_port();
+    RunningServer server{port, 2, 0, [](std::string_view request) {
+        return handle_demo_http_request(request);
+    }};
+
+    const std::string response = request_once(
+        port,
+        "GET /health HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "\r\n");
+    expect(response.find("HTTP/1.1 200 OK\r\n") == 0, "http server GET /health should return 200");
+    expect(response.find("\r\n\r\nok\n") != std::string::npos, "http server GET /health body should be ok");
+}
+
+void test_http_server_post_echo() {
+    const std::uint16_t port = find_free_loopback_port();
+    RunningServer server{port, 2, 0, [](std::string_view request) {
+        return handle_demo_http_request(request);
+    }};
+
+    const std::string response = request_once(
+        port,
+        "POST /echo HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: 12\r\n"
+        "\r\n"
+        "hello server");
+    expect(response.find("HTTP/1.1 200 OK\r\n") == 0, "http server POST /echo should return 200");
+    expect(response.find("\r\n\r\nhello server") != std::string::npos,
+           "http server POST /echo should echo request body");
 }
 
 void test_concurrent_echo() {
@@ -389,7 +505,11 @@ int main() {
         SocketRuntime runtime;
         run_test("timer_queue", test_timer_queue);
         run_test("buffer", test_buffer);
+        run_test("http_parser", test_http_parser);
+        run_test("http_response_routes", test_http_response_routes);
         run_test("single_connection_echo", test_single_connection_echo);
+        run_test("http_server_health", test_http_server_health);
+        run_test("http_server_post_echo", test_http_server_post_echo);
         run_test("concurrent_echo", test_concurrent_echo);
         run_test("idle_timeout", test_idle_timeout_closes_inactive_connection);
         std::cout << "All tests passed.\n";

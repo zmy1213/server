@@ -48,6 +48,7 @@ set(CPP20_SERVER_SOURCES
     src/net/socket.cpp
     src/net/timer_queue.cpp
     src/net/tcp_server.cpp
+    src/protocol/http.cpp
 )
 
 if(NOT CPP20_SERVER_RESOLVED_BACKEND STREQUAL "iocp")
@@ -105,6 +106,9 @@ endif()
 if(CPP20_SERVER_BUILD_EXAMPLES)
     add_executable(echo_server examples/echo_server.cpp)
     target_link_libraries(echo_server PRIVATE cpp20_server)
+
+    add_executable(http_server examples/http_server.cpp)
+    target_link_libraries(http_server PRIVATE cpp20_server)
 endif()
 
 if(CPP20_SERVER_BUILD_TESTS)
