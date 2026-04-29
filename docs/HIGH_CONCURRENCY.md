@@ -1042,6 +1042,71 @@ input buffer 解决“请求一次 recv 不完整，或者一次 recv 太多”
 同连接多请求：同一个 TCP 连接连续发送多个 HTTP 请求
 ```
 
+## 为什么高并发服务器需要日志、配置、指标
+
+网络收发跑通以后，服务器还需要能运维。
+
+运维不是复杂概念，小白可以先理解成三件事：
+
+```text
+配置：服务器启动时用什么端口、多少线程、超时时间是多少
+日志：服务器发生了什么，什么时候启动、什么时候停止、哪里出错
+指标：服务器现在有多少连接、读了多少字节、写了多少字节
+```
+
+为什么日志要异步：
+
+```text
+业务线程正在处理客户端请求
+        ↓
+如果直接写磁盘日志
+        ↓
+磁盘慢的时候业务线程会被卡住
+        ↓
+大量连接就会一起变慢
+```
+
+当前做法：
+
+```text
+业务线程调用 logger.info()
+        ↓
+日志先放进内存队列
+        ↓
+后台日志线程从队列取日志
+        ↓
+后台线程写控制台或文件
+```
+
+为什么指标要做成快照：
+
+```text
+worker 线程正在更新连接数和字节数
+        ↓
+/metrics 或 stop 时想读取这些数字
+        ↓
+不能直接读内部变量，否则会和 worker 线程抢同一份数据
+        ↓
+TcpServer::stats() 返回一个 ServerStats 快照
+```
+
+对应代码：
+
+| 功能 | 代码位置 | 说明 |
+| --- | --- | --- |
+| 配置文件 | [`include/cpp20_server/base/config.h`](../include/cpp20_server/base/config.h), [`src/base/config.cpp`](../src/base/config.cpp) | 读取 `key=value` 配置 |
+| 异步日志 | [`include/cpp20_server/base/logger.h`](../include/cpp20_server/base/logger.h), [`src/base/logger.cpp`](../src/base/logger.cpp) | 后台线程写日志 |
+| 指标格式化 | [`include/cpp20_server/base/metrics.h`](../include/cpp20_server/base/metrics.h), [`src/base/metrics.cpp`](../src/base/metrics.cpp) | 输出文本或 Prometheus 风格指标 |
+| 指标快照 | [`include/cpp20_server/net/tcp_server.h`](../include/cpp20_server/net/tcp_server.h), [`src/net/tcp_server.cpp`](../src/net/tcp_server.cpp) | `TcpServer::stats()` 返回线程安全快照 |
+| HTTP 指标入口 | [`examples/http_server.cpp`](../examples/http_server.cpp) | `GET /metrics` 返回指标 |
+
+启动示例：
+
+```bash
+./build/http_server --config examples/server.conf
+curl http://127.0.0.1:8080/metrics
+```
+
 ## 但是百万连接不只靠代码
 
 要跑到百万连接，还需要系统资源配合。
@@ -1088,6 +1153,9 @@ tests/server_tests.cpp
 ```text
 TimerQueue 单次和重复定时任务
 验证 Buffer 基础读写是否正确
+验证 Config 配置解析
+验证 AsyncLogger 异步写日志
+验证 Metrics 指标格式化
 验证 HTTP 请求解析
 验证 HTTP 响应生成和示例路由
 验证 HTTP 半包处理

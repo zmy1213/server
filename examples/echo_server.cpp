@@ -1,3 +1,6 @@
+#include "cpp20_server/base/config.h"
+#include "cpp20_server/base/logger.h"
+#include "cpp20_server/base/metrics.h"
 #include "cpp20_server/net/tcp_server.h"
 
 #include <csignal>
@@ -6,6 +9,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -41,23 +45,57 @@ std::uint64_t parse_idle_timeout_seconds(const char* value) {
     return static_cast<std::uint64_t>(seconds);
 }
 
+cpp20_server::base::Config load_config_if_requested(int argc, char* argv[], int& arg_index) {
+    cpp20_server::base::Config config;
+    if (argc >= 3 && std::string_view{argv[1]} == "--config") {
+        config = cpp20_server::base::Config::from_file(argv[2]);
+        arg_index = 3;
+    }
+    return config;
+}
+
+void apply_config(const cpp20_server::base::Config& config,
+                  cpp20_server::net::TcpServerOptions& options) {
+    options.host = config.get_string("host", options.host);
+    options.port = config.get_port("port", options.port);
+    options.backlog = config.get_int("backlog", options.backlog);
+    options.max_events = config.get_size("max_events", options.max_events);
+    options.worker_threads = config.get_size("worker_threads", options.worker_threads);
+    options.idle_timeout_seconds = config.get_u64("idle_timeout_seconds", options.idle_timeout_seconds);
+}
+
+cpp20_server::base::LoggerOptions logger_options_from_config(const cpp20_server::base::Config& config) {
+    cpp20_server::base::LoggerOptions options;
+    options.level = cpp20_server::base::parse_log_level(config.get_string("log_level", "info"));
+    options.file_path = config.get_string("log_file");
+    options.console = config.get_bool("log_console", true);
+    return options;
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
     try {
+        int arg_index = 1;
+        const auto config = load_config_if_requested(argc, argv, arg_index);
+
         cpp20_server::net::TcpServerOptions options;
-        if (argc >= 2) {
-            options.host = argv[1];
+        apply_config(config, options);
+        if (argc > arg_index) {
+            options.host = argv[arg_index];
         }
-        if (argc >= 3) {
-            options.port = parse_port(argv[2]);
+        if (argc > arg_index + 1) {
+            options.port = parse_port(argv[arg_index + 1]);
         }
-        if (argc >= 4) {
-            options.worker_threads = parse_worker_threads(argv[3]);
+        if (argc > arg_index + 2) {
+            options.worker_threads = parse_worker_threads(argv[arg_index + 2]);
         }
-        if (argc >= 5) {
-            options.idle_timeout_seconds = parse_idle_timeout_seconds(argv[4]);
+        if (argc > arg_index + 3) {
+            options.idle_timeout_seconds = parse_idle_timeout_seconds(argv[arg_index + 3]);
         }
+
+        cpp20_server::base::AsyncLogger logger{logger_options_from_config(config)};
+        logger.info("starting echo server");
 
         cpp20_server::net::TcpServer server{options};
         g_server = &server;
@@ -70,11 +108,9 @@ int main(int argc, char* argv[]) {
 
         server.start();
 
-        const auto& stats = server.stats();
-        std::cout << "stopped. accepted=" << stats.accepted_connections
-                  << " active=" << stats.active_connections
-                  << " bytes_read=" << stats.bytes_read
-                  << " bytes_written=" << stats.bytes_written << '\n';
+        const auto stats = server.stats();
+        logger.info("echo server stopped: " + cpp20_server::base::format_server_stats_text(stats));
+        std::cout << "stopped. " << cpp20_server::base::format_server_stats_text(stats) << '\n';
         return 0;
     } catch (const std::exception& ex) {
         std::cerr << "fatal: " << ex.what() << '\n';

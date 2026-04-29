@@ -44,7 +44,7 @@ public:
     void stop() noexcept;
 
     [[nodiscard]] const TcpServerOptions& options() const noexcept;
-    [[nodiscard]] const ServerStats& stats() const noexcept;
+    [[nodiscard]] ServerStats stats() const;
     [[nodiscard]] const char* backend_name() const noexcept;
 
 private:

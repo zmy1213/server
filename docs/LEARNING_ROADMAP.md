@@ -1004,6 +1004,9 @@ HTTP Server 第一版
 HTTP 请求解析和响应生成第一版
 Connection 输入缓冲区第一版
 HTTP 半包、粘包、同连接多请求处理第一版
+Config 配置文件第一版
+AsyncLogger 异步日志第一版
+Metrics 指标输出第一版
 EventLoop / Channel / Acceptor / Connection 拆分
 多线程 Reactor 第一版
 TimerQueue 小根堆定时器第一版
@@ -1016,21 +1019,25 @@ TimerQueue 小根堆定时器第一版
 下一步最合理的是：
 
 ```text
-第 8 阶段：日志、配置、指标
+压测脚本
 ```
 
-也就是先做工程化基础能力：
+原因是现在服务器已经有：
 
 ```text
-Logger
-Config
-Metrics
+网络收发
+多线程 Reactor
+定时器
+HTTP 基础协议
+输入缓冲区
+日志
+配置
+指标
 ```
 
-这些做完后，再进入：
+下一步要用压测脚本把性能瓶颈测出来，再进入：
 
 ```text
-压测
 系统调优
 ```
 

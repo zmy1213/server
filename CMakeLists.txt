@@ -44,6 +44,9 @@ if(CPP20_SERVER_RESOLVED_BACKEND STREQUAL "iocp" AND NOT WIN32)
 endif()
 
 set(CPP20_SERVER_SOURCES
+    src/base/config.cpp
+    src/base/logger.cpp
+    src/base/metrics.cpp
     src/net/buffer.cpp
     src/net/socket.cpp
     src/net/timer_queue.cpp

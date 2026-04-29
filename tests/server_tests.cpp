@@ -1,3 +1,6 @@
+#include "cpp20_server/base/config.h"
+#include "cpp20_server/base/logger.h"
+#include "cpp20_server/base/metrics.h"
 #include "cpp20_server/net/buffer.h"
 #include "cpp20_server/net/socket.h"
 #include "cpp20_server/net/tcp_server.h"
@@ -10,8 +13,11 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -36,7 +42,14 @@
 namespace {
 
 using cpp20_server::net::Buffer;
+using cpp20_server::base::AsyncLogger;
+using cpp20_server::base::Config;
+using cpp20_server::base::LogLevel;
+using cpp20_server::base::LoggerOptions;
+using cpp20_server::base::format_server_stats_prometheus;
+using cpp20_server::base::format_server_stats_text;
 using cpp20_server::net::SocketRuntime;
+using cpp20_server::net::ServerStats;
 using cpp20_server::net::TcpServer;
 using cpp20_server::net::TcpServerOptions;
 using cpp20_server::net::TimerQueue;
@@ -427,6 +440,73 @@ void test_buffer() {
     expect(buffer.empty(), "over-retrieve should clear buffer");
 }
 
+void test_config_parser() {
+    const auto config = Config::from_text(
+        "# comments are ignored\n"
+        "host = 127.0.0.1\n"
+        "port = 9090\n"
+        "worker_threads = 4\n"
+        "idle_timeout_seconds = 30\n"
+        "log_console = false\n");
+
+    expect(config.get_string("host") == "127.0.0.1", "config host should be parsed");
+    expect(config.get_port("port", 8080) == 9090, "config port should be parsed");
+    expect(config.get_size("worker_threads", 0) == 4, "config worker_threads should be parsed");
+    expect(config.get_u64("idle_timeout_seconds", 0) == 30, "config timeout should be parsed");
+    expect(!config.get_bool("log_console", true), "config bool should be parsed");
+    expect(config.get_string("missing", "fallback") == "fallback", "config default should be returned");
+}
+
+void test_async_logger() {
+    const auto log_path = std::filesystem::temp_directory_path()
+                          / ("cpp20_server_test_"
+                             + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())
+                             + ".log");
+
+    LoggerOptions options;
+    options.level = LogLevel::debug;
+    options.file_path = log_path.string();
+    options.console = false;
+
+    {
+        AsyncLogger logger{options};
+        logger.debug("debug line");
+        logger.info("info line");
+        logger.stop();
+    }
+
+    std::ifstream file{log_path};
+    std::string content{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+    std::filesystem::remove(log_path);
+
+    expect(content.find("[DEBUG] debug line") != std::string::npos,
+           "async logger should write debug line");
+    expect(content.find("[INFO] info line") != std::string::npos,
+           "async logger should write info line");
+}
+
+void test_metrics_formatter() {
+    ServerStats stats;
+    stats.accepted_connections = 10;
+    stats.active_connections = 2;
+    stats.bytes_read = 128;
+    stats.bytes_written = 256;
+
+    const auto text = format_server_stats_text(stats);
+    expect(text.find("accepted_connections=10") != std::string::npos,
+           "text metrics should include accepted connections");
+    expect(text.find("bytes_written=256") != std::string::npos,
+           "text metrics should include written bytes");
+
+    const auto prometheus = format_server_stats_prometheus(stats, "kqueue");
+    expect(prometheus.find("cpp20_server_accepted_connections_total{backend=\"kqueue\"} 10")
+               != std::string::npos,
+           "prometheus metrics should include backend label");
+    expect(prometheus.find("cpp20_server_active_connections{backend=\"kqueue\"} 2")
+               != std::string::npos,
+           "prometheus metrics should include active gauge");
+}
+
 void test_http_parser() {
     const std::string request =
         "POST /echo HTTP/1.1\r\n"
@@ -684,6 +764,9 @@ int main() {
         SocketRuntime runtime;
         run_test("timer_queue", test_timer_queue);
         run_test("buffer", test_buffer);
+        run_test("config_parser", test_config_parser);
+        run_test("async_logger", test_async_logger);
+        run_test("metrics_formatter", test_metrics_formatter);
         run_test("http_parser", test_http_parser);
         run_test("http_stream", test_http_stream_handles_partial_and_sticky_requests);
         run_test("http_response_routes", test_http_response_routes);

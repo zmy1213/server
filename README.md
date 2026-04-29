@@ -33,6 +33,9 @@ docs/LEARNING_ROADMAP.md
 - 支持最小 HTTP 请求解析和响应生成
 - 支持小根堆定时器
 - 支持空闲连接超时关闭
+- 支持简单 `key=value` 配置文件
+- 支持异步日志
+- 支持运行指标文本和 Prometheus 风格输出
 
 说明：百万级连接不是只靠 C++ 代码就能保证，还需要系统参数、内存、端口、压测机数量一起配合。这个项目的目标是使用各系统上适合高并发的 IO 模型：Linux 用 `epoll`，macOS 用 `kqueue`，Windows 用 `IOCP`。
 
@@ -60,9 +63,14 @@ docs/LEARNING_ROADMAP.md
 │   └── LEARNING_ROADMAP.md
 ├── examples/
 │   ├── echo_server.cpp
-│   └── http_server.cpp
+│   ├── http_server.cpp
+│   └── server.conf
 ├── include/
 │   └── cpp20_server/
+│       ├── base/
+│       │   ├── config.h
+│       │   ├── logger.h
+│       │   └── metrics.h
 │       ├── net/
 │       │   ├── acceptor.h
 │       │   ├── buffer.h
@@ -76,6 +84,10 @@ docs/LEARNING_ROADMAP.md
 │       └── protocol/
 │           └── http.h
 ├── src/
+│   ├── base/
+│   │   ├── config.cpp
+│   │   ├── logger.cpp
+│   │   └── metrics.cpp
 │   ├── net/
 │   │   ├── acceptor.cpp
 │   │   ├── buffer.cpp
@@ -96,7 +108,10 @@ docs/LEARNING_ROADMAP.md
 
 ```text
 acceptor     监听 socket，专门负责 accept 新连接
-buffer       输出缓冲区
+buffer       输入缓冲区和输出缓冲区
+config       读取 key=value 配置文件
+logger       后台线程异步写日志
+metrics      把 ServerStats 转成文本或 Prometheus 格式
 channel      一个 fd 关心的事件和回调
 connection   单个客户端连接的读写状态
 event_loop   Reactor 事件循环
@@ -462,6 +477,79 @@ server.set_stream_callback([](Buffer& input, Buffer& output) {
 
 `set_message_callback()` 仍然保留给 Echo 这种简单协议使用。HTTP 使用 `set_stream_callback()`，因为 HTTP 必须自己判断消息边界。
 
+## 最新代码说明：日志、配置、指标
+
+这一轮进入第 8 阶段，先补工程化基础能力。
+
+新增模块：
+
+```text
+Config   读取简单 key=value 配置
+Logger   异步日志，业务线程只把日志放进队列，后台线程负责写
+Metrics  把 ServerStats 转成文本或 Prometheus 风格指标
+```
+
+为什么要做这些：
+
+```text
+配置文件：启动参数越来越多，不能一直靠命令行硬传
+异步日志：高并发下不能让业务线程卡在磁盘写日志上
+指标：服务器跑起来后，要知道连接数、读写字节数这些状态
+```
+
+配置文件示例：
+
+```text
+examples/server.conf
+```
+
+启动 HTTP Server：
+
+```bash
+./build/http_server --config examples/server.conf
+```
+
+配置项：
+
+```text
+host = 127.0.0.1
+port = 8080
+worker_threads = 4
+idle_timeout_seconds = 30
+backlog = 4096
+max_events = 4096
+log_level = info
+log_console = true
+log_file =
+```
+
+查看 HTTP 指标：
+
+```bash
+curl http://127.0.0.1:8080/metrics
+```
+
+返回内容是 Prometheus 风格文本，例如：
+
+```text
+cpp20_server_accepted_connections_total{backend="kqueue"} 10
+cpp20_server_active_connections{backend="kqueue"} 2
+cpp20_server_bytes_read_total{backend="kqueue"} 128
+cpp20_server_bytes_written_total{backend="kqueue"} 256
+```
+
+核心代码：
+
+```text
+include/cpp20_server/base/config.h
+src/base/config.cpp
+include/cpp20_server/base/logger.h
+src/base/logger.cpp
+include/cpp20_server/base/metrics.h
+src/base/metrics.cpp
+examples/http_server.cpp
+```
+
 ## 最新代码说明：最小 HTTP Server
 
 这一轮代码完成了第 6 阶段 / 第 13 阶段的第一版：最小 HTTP 协议层和 HTTP Server 示例。
@@ -713,6 +801,9 @@ ctest --test-dir build --output-on-failure
 ```text
 TimerQueue 单次定时任务和重复定时任务
 Buffer 基础读写
+Config 配置解析
+AsyncLogger 异步写日志
+Metrics 指标格式化
 HTTP 请求解析
 HTTP 响应生成和路由
 HTTP 半包处理
@@ -740,25 +831,28 @@ warnings-as-errors 严格构建：100% tests passed, 0 tests failed out of 1
 ```text
 [PASS] timer_queue (5 ms)
 [PASS] buffer (0 ms)
+[PASS] config_parser (0 ms)
+[PASS] async_logger (1 ms)
+[PASS] metrics_formatter (0 ms)
 [PASS] http_parser (0 ms)
 [PASS] http_stream (0 ms)
 [PASS] http_response_routes (0 ms)
-listening on 127.0.0.1:50272 backend=kqueue worker_threads=2
+listening on 127.0.0.1:52182 backend=kqueue worker_threads=2
 [PASS] single_connection_echo (102 ms)
-listening on 127.0.0.1:50275 backend=kqueue worker_threads=2
+listening on 127.0.0.1:52185 backend=kqueue worker_threads=2
 [PASS] http_server_health (102 ms)
-listening on 127.0.0.1:50279 backend=kqueue worker_threads=2
+listening on 127.0.0.1:52188 backend=kqueue worker_threads=2
 [PASS] http_server_post_echo (102 ms)
-listening on 127.0.0.1:50282 backend=kqueue worker_threads=2
-[PASS] http_server_partial_request (131 ms)
-listening on 127.0.0.1:50285 backend=kqueue worker_threads=2
-[PASS] http_server_sticky_requests (102 ms)
-listening on 127.0.0.1:50288 backend=kqueue worker_threads=2
+listening on 127.0.0.1:52191 backend=kqueue worker_threads=2
+[PASS] http_server_partial_request (157 ms)
+listening on 127.0.0.1:52195 backend=kqueue worker_threads=2
+[PASS] http_server_sticky_requests (103 ms)
+listening on 127.0.0.1:52199 backend=kqueue worker_threads=2
 [PASS] http_server_same_connection (102 ms)
-listening on 127.0.0.1:50291 backend=kqueue worker_threads=4
-[PASS] concurrent_echo (105 ms)
-listening on 127.0.0.1:50357 backend=kqueue worker_threads=2
-[PASS] idle_timeout (1104 ms)
+listening on 127.0.0.1:52202 backend=kqueue worker_threads=4
+[PASS] concurrent_echo (103 ms)
+listening on 127.0.0.1:52268 backend=kqueue worker_threads=2
+[PASS] idle_timeout (1102 ms)
 All tests passed.
 ```
 
@@ -884,13 +978,10 @@ git remote set-url origin git@github.com:zmy1213/server.git
 
 ## 后续开发计划
 
-1. 增加异步日志
-2. 增加配置文件
-3. 增加运行指标
-4. 增加压测脚本
-5. 增加 Linux 百万连接参数调优文档
-6. 增加 Windows AcceptEx 批量异步接收连接
-7. 增加 GitHub Actions 跨平台构建测试
+1. 增加压测脚本
+2. 增加 Linux 百万连接参数调优文档
+3. 增加 Windows AcceptEx 批量异步接收连接
+4. 增加 GitHub Actions 跨平台构建测试
 
 ## 当前阶段说明
 

@@ -134,7 +134,8 @@ public:
         return options_;
     }
 
-    [[nodiscard]] const ServerStats& stats() const noexcept {
+    [[nodiscard]] ServerStats stats() const {
+        std::scoped_lock lock(stats_mutex_);
         return stats_;
     }
 
@@ -241,11 +242,16 @@ private:
             throw std::system_error(GetLastError(), std::system_category(), "CreateIoCompletionPort(socket) failed");
         }
 
+        std::uint64_t active_connections = 0;
         {
             std::scoped_lock lock(connections_mutex_);
             connections_.emplace(client, std::move(connection));
+            active_connections = static_cast<std::uint64_t>(connections_.size());
+        }
+        {
+            std::scoped_lock lock(stats_mutex_);
             ++stats_.accepted_connections;
-            stats_.active_connections = static_cast<std::uint64_t>(connections_.size());
+            stats_.active_connections = active_connections;
         }
 
         post_recv(raw);
@@ -458,7 +464,9 @@ private:
         auto it = connections_.find(connection->fd);
         if (it != connections_.end()) {
             connections_.erase(it);
-            stats_.active_connections = static_cast<std::uint64_t>(connections_.size());
+            const auto active_connections = static_cast<std::uint64_t>(connections_.size());
+            std::scoped_lock stats_lock(stats_mutex_);
+            stats_.active_connections = active_connections;
         }
     }
 
@@ -468,6 +476,7 @@ private:
             close_connection_socket(connection.get());
         }
         connections_.clear();
+        std::scoped_lock stats_lock(stats_mutex_);
         stats_.active_connections = 0;
     }
 
@@ -544,7 +553,8 @@ public:
         return options_;
     }
 
-    [[nodiscard]] const ServerStats& stats() const noexcept {
+    [[nodiscard]] ServerStats stats() const {
+        std::scoped_lock lock(stats_mutex_);
         return stats_;
     }
 
@@ -613,11 +623,16 @@ private:
         });
 
         auto* raw = connection.get();
+        std::uint64_t active_connections = 0;
         {
             std::scoped_lock lock(connections_mutex_);
             connections_.emplace(client_fd, std::move(connection));
+            active_connections = static_cast<std::uint64_t>(connections_.size());
+        }
+        {
+            std::scoped_lock lock(stats_mutex_);
             ++stats_.accepted_connections;
-            stats_.active_connections = static_cast<std::uint64_t>(connections_.size());
+            stats_.active_connections = active_connections;
         }
         raw->start();
         schedule_idle_check(loop, client_fd);
@@ -674,7 +689,9 @@ private:
             }
             connection = std::move(it->second);
             connections_.erase(it);
-            stats_.active_connections = static_cast<std::uint64_t>(connections_.size());
+            const auto active_connections = static_cast<std::uint64_t>(connections_.size());
+            std::scoped_lock stats_lock(stats_mutex_);
+            stats_.active_connections = active_connections;
         }
 
         connection->close();
@@ -685,6 +702,9 @@ private:
         {
             std::scoped_lock lock(connections_mutex_);
             connections.swap(connections_);
+        }
+        {
+            std::scoped_lock lock(stats_mutex_);
             stats_.active_connections = 0;
         }
 
@@ -734,7 +754,7 @@ const TcpServerOptions& TcpServer::options() const noexcept {
     return impl_->options();
 }
 
-const ServerStats& TcpServer::stats() const noexcept {
+ServerStats TcpServer::stats() const {
     return impl_->stats();
 }
 
