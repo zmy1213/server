@@ -48,6 +48,7 @@ set(CPP20_SERVER_SOURCES
     src/base/logger.cpp
     src/base/metrics.cpp
     src/net/buffer.cpp
+    src/net/http_client.cpp
     src/net/socket.cpp
     src/net/timer_queue.cpp
     src/net/tcp_server.cpp

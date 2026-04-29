@@ -1010,6 +1010,7 @@ Metrics 指标输出第一版
 HTTP 压测脚本第一版
 TimerQueue 可取消定时器第一版
 EventLoop 跨线程唤醒第一版
+最小 C++ HTTP Client 第一版
 HttpRouter 路由表第一版
 EventLoop / Channel / Acceptor / Connection 拆分
 多线程 Reactor 第一版
@@ -1023,7 +1024,7 @@ TimerQueue 小根堆定时器第一版
 下一步最合理的是：
 
 ```text
-Linux 百万连接参数调优文档
+异步 connect 第一版
 ```
 
 原因是现在服务器已经有：
@@ -1033,20 +1034,20 @@ Linux 百万连接参数调优文档
 多线程 Reactor
 定时器
 HTTP 基础协议
+最小同步 HTTP Client
 输入缓冲区
 日志
 配置
 指标
 ```
 
-接下来要把压测和系统参数连起来：
+接下来最自然的是把“服务端能收发”继续扩展成“客户端也能高并发发起连接”：
 
 ```text
-ulimit -n
-somaxconn
-tcp_max_syn_backlog
-端口范围
-内存估算
+非阻塞 connect
+连接成功/失败回调
+连接超时
+后续的请求取消
 ```
 
 不要跳着做。否则后面功能越多，代码越难维护。

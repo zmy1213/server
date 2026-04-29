@@ -43,6 +43,19 @@ bool parse_content_length(std::string_view value, std::size_t& length) {
     return true;
 }
 
+bool parse_status_code(std::string_view value, int& status_code) {
+    value = trim(value);
+    const char* begin = value.data();
+    const char* end = value.data() + value.size();
+    int parsed = 0;
+    auto [ptr, ec] = std::from_chars(begin, end, parsed);
+    if (ec != std::errc{} || ptr != end) {
+        return false;
+    }
+    status_code = parsed;
+    return true;
+}
+
 void parse_header_line(HttpRequest& request, std::string_view line) {
     const auto colon = line.find(':');
     if (colon == std::string_view::npos) {
@@ -54,6 +67,23 @@ void parse_header_line(HttpRequest& request, std::string_view line) {
     if (!name.empty()) {
         request.headers[name] = std::string{value};
     }
+}
+
+void parse_header_line(HttpResponse& response, std::string_view line) {
+    const auto colon = line.find(':');
+    if (colon == std::string_view::npos) {
+        return;
+    }
+
+    const std::string name = lower_copy(trim(line.substr(0, colon)));
+    const auto value = trim(line.substr(colon + 1));
+    if (!name.empty()) {
+        response.headers[name] = std::string{value};
+    }
+}
+
+bool has_empty_response_body(int status_code) noexcept {
+    return (status_code >= 100 && status_code < 200) || status_code == 204 || status_code == 304;
 }
 
 } // namespace
@@ -116,6 +146,79 @@ std::optional<HttpRequest> parse_http_request(std::string_view raw) {
         return std::nullopt;
     }
     return result->request;
+}
+
+std::optional<HttpResponseParseResult> try_parse_http_response(std::string_view raw) {
+    const auto header_end = raw.find("\r\n\r\n");
+    if (header_end == std::string_view::npos) {
+        return std::nullopt;
+    }
+
+    const auto header_block = raw.substr(0, header_end);
+    const auto body_start = header_end + 4;
+    const auto status_line_end = header_block.find("\r\n");
+    const auto status_line = status_line_end == std::string_view::npos
+                                 ? header_block
+                                 : header_block.substr(0, status_line_end);
+
+    const auto first_space = status_line.find(' ');
+    if (first_space == std::string_view::npos) {
+        return std::nullopt;
+    }
+
+    const auto second_space = status_line.find(' ', first_space + 1);
+    const auto version = trim(status_line.substr(0, first_space));
+    const auto status_text = second_space == std::string_view::npos
+                                 ? status_line.substr(first_space + 1)
+                                 : status_line.substr(first_space + 1, second_space - first_space - 1);
+    if (version.empty()) {
+        return std::nullopt;
+    }
+
+    HttpResponse response;
+    response.version = std::string{version};
+    if (!parse_status_code(status_text, response.status_code)) {
+        return std::nullopt;
+    }
+    if (second_space != std::string_view::npos) {
+        response.reason = std::string{trim(status_line.substr(second_space + 1))};
+    }
+
+    std::size_t cursor = status_line_end == std::string_view::npos ? header_block.size() : status_line_end + 2;
+    while (cursor < header_block.size()) {
+        auto next = header_block.find("\r\n", cursor);
+        if (next == std::string_view::npos) {
+            next = header_block.size();
+        }
+        parse_header_line(response, header_block.substr(cursor, next - cursor));
+        cursor = next + 2;
+    }
+
+    std::size_t content_length = 0;
+    if (const auto it = response.headers.find("content-length"); it != response.headers.end()) {
+        if (!parse_content_length(it->second, content_length)) {
+            return std::nullopt;
+        }
+        if (raw.size() < body_start + content_length) {
+            return std::nullopt;
+        }
+        response.body = std::string{raw.substr(body_start, content_length)};
+        return HttpResponseParseResult{std::move(response), body_start + content_length};
+    }
+
+    if (!has_empty_response_body(response.status_code)) {
+        return std::nullopt;
+    }
+
+    return HttpResponseParseResult{std::move(response), body_start};
+}
+
+std::optional<HttpResponse> parse_http_response(std::string_view raw) {
+    const auto result = try_parse_http_response(raw);
+    if (!result) {
+        return std::nullopt;
+    }
+    return result->response;
 }
 
 std::string make_http_response(int status_code,

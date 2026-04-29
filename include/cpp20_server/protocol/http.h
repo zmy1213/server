@@ -24,6 +24,19 @@ struct HttpParseResult {
     std::size_t bytes_consumed{0};
 };
 
+struct HttpResponse {
+    std::string version;
+    int status_code{0};
+    std::string reason;
+    std::unordered_map<std::string, std::string> headers;
+    std::string body;
+};
+
+struct HttpResponseParseResult {
+    HttpResponse response;
+    std::size_t bytes_consumed{0};
+};
+
 using HttpHandler = std::function<std::string(const HttpRequest& request)>;
 
 class HttpRouter {
@@ -40,6 +53,10 @@ private:
 // Returns std::nullopt when the byte stream does not contain a complete request yet.
 std::optional<HttpRequest> parse_http_request(std::string_view raw);
 std::optional<HttpParseResult> try_parse_http_request(std::string_view raw);
+// Minimal response parser used by the teaching HTTP client.
+// Current version supports Content-Length based responses and body-less responses.
+std::optional<HttpResponse> parse_http_response(std::string_view raw);
+std::optional<HttpResponseParseResult> try_parse_http_response(std::string_view raw);
 
 std::string make_http_response(int status_code,
                                std::string_view reason,

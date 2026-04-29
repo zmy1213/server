@@ -3,6 +3,7 @@
 #include "cpp20_server/base/metrics.h"
 #include "cpp20_server/net/buffer.h"
 #include "cpp20_server/net/event_loop.h"
+#include "cpp20_server/net/http_client.h"
 #include "cpp20_server/net/socket.h"
 #include "cpp20_server/net/tcp_server.h"
 #include "cpp20_server/net/timer_queue.h"
@@ -50,6 +51,8 @@ using cpp20_server::base::LoggerOptions;
 using cpp20_server::base::format_server_stats_prometheus;
 using cpp20_server::base::format_server_stats_text;
 using cpp20_server::net::SocketRuntime;
+using cpp20_server::net::HttpClient;
+using cpp20_server::net::HttpClientOptions;
 using cpp20_server::net::ServerStats;
 using cpp20_server::net::TcpServer;
 using cpp20_server::net::TcpServerOptions;
@@ -64,7 +67,9 @@ using cpp20_server::protocol::handle_demo_http_stream;
 using cpp20_server::protocol::HttpRouter;
 using cpp20_server::protocol::make_http_response;
 using cpp20_server::protocol::parse_http_request;
+using cpp20_server::protocol::parse_http_response;
 using cpp20_server::protocol::try_parse_http_request;
+using cpp20_server::protocol::try_parse_http_response;
 
 void expect(bool condition, std::string_view message) {
     if (!condition) {
@@ -258,39 +263,13 @@ bool wait_until_remote_close(socket_t fd) {
     return false;
 }
 
-std::size_t http_body_size(std::string_view response) {
-    const auto header_end = response.find("\r\n\r\n");
-    if (header_end == std::string_view::npos) {
-        throw std::runtime_error("http response header is incomplete");
-    }
-
-    constexpr std::string_view header_name = "Content-Length:";
-    const auto content_length = response.find(header_name);
-    if (content_length == std::string_view::npos || content_length > header_end) {
-        throw std::runtime_error("http response is missing content-length");
-    }
-
-    auto value = response.substr(content_length + header_name.size());
-    const auto line_end = value.find("\r\n");
-    value = value.substr(0, line_end);
-    while (!value.empty() && value.front() == ' ') {
-        value.remove_prefix(1);
-    }
-
-    return static_cast<std::size_t>(std::stoul(std::string{value}));
-}
-
 std::string recv_one_http_response(socket_t fd, std::string& inbox) {
     for (;;) {
-        const auto header_end = inbox.find("\r\n\r\n");
-        if (header_end != std::string::npos) {
-            const auto body_size = http_body_size(inbox);
-            const auto total_size = header_end + 4 + body_size;
-            if (inbox.size() >= total_size) {
-                std::string response = inbox.substr(0, total_size);
-                inbox.erase(0, total_size);
-                return response;
-            }
+        const auto parsed = try_parse_http_response(inbox);
+        if (parsed.has_value()) {
+            std::string response = inbox.substr(0, parsed->bytes_consumed);
+            inbox.erase(0, parsed->bytes_consumed);
+            return response;
         }
 
         char buffer[4096]{};
@@ -571,6 +550,30 @@ void test_http_parser() {
     expect(!incomplete.has_value(), "http parser should wait for complete header");
 }
 
+void test_http_response_parser() {
+    const std::string response =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Length: 10\r\n"
+        "Content-Type: text/plain\r\n"
+        "\r\n"
+        "hello http";
+    const auto parsed = parse_http_response(response);
+    expect(parsed.has_value(), "http response parser should parse complete response");
+    expect(parsed->version == "HTTP/1.1", "http response version should be HTTP/1.1");
+    expect(parsed->status_code == 200, "http response status should be 200");
+    expect(parsed->reason == "OK", "http response reason should be OK");
+    expect(parsed->headers.at("content-type") == "text/plain", "http response content-type should parse");
+    expect(parsed->body == "hello http", "http response body should match content-length");
+
+    const auto parsed_with_size = try_parse_http_response(response + response);
+    expect(parsed_with_size.has_value(), "http response parser should report consumed bytes");
+    expect(parsed_with_size->bytes_consumed == response.size(),
+           "http response parser consumed size should stop after first response");
+
+    const auto incomplete = parse_http_response("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe");
+    expect(!incomplete.has_value(), "http response parser should wait for a full body");
+}
+
 void test_http_stream_handles_partial_and_sticky_requests() {
     Buffer input;
     Buffer output;
@@ -660,6 +663,39 @@ void test_http_server_post_echo() {
     expect(response.find("HTTP/1.1 200 OK\r\n") == 0, "http server POST /echo should return 200");
     expect(response.find("\r\n\r\nhello server") != std::string::npos,
            "http server POST /echo should echo request body");
+}
+
+void test_http_client_get() {
+    const std::uint16_t port = find_free_loopback_port();
+    RunningServer server{port, 2, 0, TcpServer::StreamCallback{[](Buffer& input, Buffer& output) {
+        handle_demo_http_stream(input, output);
+    }}};
+
+    HttpClientOptions options;
+    options.host = "127.0.0.1";
+    options.port = port;
+    HttpClient client{options};
+
+    const auto response = client.get("/health");
+    expect(response.status_code == 200, "http client GET /health should return 200");
+    expect(response.body == "ok\n", "http client GET /health body should be ok");
+    expect(response.headers.at("content-length") == "3", "http client should parse content-length");
+}
+
+void test_http_client_post() {
+    const std::uint16_t port = find_free_loopback_port();
+    RunningServer server{port, 2, 0, TcpServer::StreamCallback{[](Buffer& input, Buffer& output) {
+        handle_demo_http_stream(input, output);
+    }}};
+
+    HttpClientOptions options;
+    options.host = "127.0.0.1";
+    options.port = port;
+    HttpClient client{options};
+
+    const auto response = client.post("/echo", "client-body");
+    expect(response.status_code == 200, "http client POST /echo should return 200");
+    expect(response.body == "client-body", "http client POST /echo should echo request body");
 }
 
 void test_http_server_partial_request() {
@@ -820,11 +856,14 @@ int main() {
         run_test("async_logger", test_async_logger);
         run_test("metrics_formatter", test_metrics_formatter);
         run_test("http_parser", test_http_parser);
+        run_test("http_response_parser", test_http_response_parser);
         run_test("http_stream", test_http_stream_handles_partial_and_sticky_requests);
         run_test("http_response_routes", test_http_response_routes);
         run_test("single_connection_echo", test_single_connection_echo);
         run_test("http_server_health", test_http_server_health);
         run_test("http_server_post_echo", test_http_server_post_echo);
+        run_test("http_client_get", test_http_client_get);
+        run_test("http_client_post", test_http_client_post);
         run_test("http_server_partial_request", test_http_server_partial_request);
         run_test("http_server_sticky_requests", test_http_server_sticky_requests);
         run_test("http_server_same_connection", test_http_server_multiple_requests_same_connection);

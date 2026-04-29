@@ -1138,6 +1138,44 @@ TcpServer::stats() 返回一个 ServerStats 快照
 curl http://127.0.0.1:8080/metrics
 ```
 
+## 最小 HTTP Client 在做什么
+
+这一轮开始补“客户端”能力，也就是程序主动去请求别的 HTTP 服务。
+
+当前这版 `HttpClient` 是最小同步版本：
+
+```text
+一个请求对应一个 TCP 连接
+当前使用阻塞 connect / send / recv
+当前主要支持 Content-Length 响应
+当前还没有实现 async connect
+当前还没有实现 chunked 响应解析
+```
+
+当前流程：
+
+```text
+HttpClient::get("/health")
+        ↓
+connect() 连到目标服务器
+        ↓
+发送完整 HTTP 请求报文
+        ↓
+recv() 持续读取字节
+        ↓
+try_parse_http_response() 判断响应是否完整
+        ↓
+返回 HttpResponse
+```
+
+对应代码：
+
+| 功能 | 代码位置 | 说明 |
+| --- | --- | --- |
+| HTTP Client 对外接口 | [`include/cpp20_server/net/http_client.h`](../include/cpp20_server/net/http_client.h), [`src/net/http_client.cpp`](../src/net/http_client.cpp) | `get()` / `post()` / `request()` 负责发请求和收响应 |
+| HTTP 响应解析 | [`include/cpp20_server/protocol/http.h`](../include/cpp20_server/protocol/http.h), [`src/protocol/http.cpp`](../src/protocol/http.cpp) | 解析状态行、响应头、响应体 |
+| 客户端集成测试 | [`tests/server_tests.cpp`](../tests/server_tests.cpp) | 启动真实 `TcpServer`，再用 `HttpClient` 发 `GET` / `POST` |
+
 ## 压测脚本怎么衡量服务器
 
 压测不是只看“能不能返回”，而是看服务器在压力下的几个数字：
@@ -1236,6 +1274,7 @@ EventLoop 跨线程唤醒
 验证 AsyncLogger 异步写日志
 验证 Metrics 指标格式化
 验证 HTTP 请求解析
+验证 HTTP 响应解析
 验证 HTTP 响应生成和示例路由
 验证 HTTP 半包处理
 验证 HTTP 粘包处理
@@ -1243,6 +1282,8 @@ EventLoop 跨线程唤醒
 启动真实 TcpServer 验证单连接 Echo
 启动真实 TcpServer 验证 HTTP GET /health
 启动真实 TcpServer 验证 HTTP POST /echo
+启动真实 HttpClient 验证 HTTP GET /health
+启动真实 HttpClient 验证 HTTP POST /echo
 启动真实 TcpServer 验证 64 个客户端并发 Echo
 验证空闲连接 1 秒超时关闭
 ```
@@ -1306,7 +1347,6 @@ Channel::handle_event()
 
 ```text
 Windows AcceptEx 异步 accept
-C++ HTTP Client
 异步 connect
 std::stop_token 风格的可取消任务接口
 更细粒度的定时器取消和连接取消语义

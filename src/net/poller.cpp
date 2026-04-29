@@ -13,6 +13,7 @@
 #include <unistd.h>
 #elif defined(CPP20_SERVER_USE_SELECT)
 #if !defined(_WIN32)
+#include <fcntl.h>
 #include <sys/select.h>
 #endif
 #endif
@@ -270,6 +271,45 @@ private:
 #endif
     }
 
+    bool is_bad_select_fd_error(std::error_code error) const noexcept {
+#if defined(_WIN32)
+        return error.value() == WSAEBADF || error.value() == WSAENOTSOCK;
+#else
+        return error.value() == EBADF;
+#endif
+    }
+
+    bool is_select_fd_valid(socket_t fd) const noexcept {
+#if defined(_WIN32)
+        int value = 0;
+        int length = sizeof(value);
+        if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&value), &length) == 0) {
+            return true;
+        }
+        const auto error = last_socket_error();
+        return error.value() != WSAEBADF && error.value() != WSAENOTSOCK;
+#else
+        errno = 0;
+        if (fcntl(fd, F_GETFD) != -1) {
+            return true;
+        }
+        return errno != EBADF;
+#endif
+    }
+
+    bool prune_invalid_select_fds() {
+        bool removed = false;
+        for (auto it = interests_.begin(); it != interests_.end();) {
+            if (is_select_fd_valid(it->first)) {
+                ++it;
+                continue;
+            }
+            it = interests_.erase(it);
+            removed = true;
+        }
+        return removed;
+    }
+
     std::vector<FiredEvent> wait_select(std::chrono::milliseconds timeout) {
         fd_set read_set;
         fd_set write_set;
@@ -309,6 +349,9 @@ private:
         if (ready < 0) {
             auto error = last_socket_error();
             if (is_interrupted(error)) {
+                return {};
+            }
+            if (is_bad_select_fd_error(error) && prune_invalid_select_fds()) {
                 return {};
             }
             throw std::system_error(error, "select failed");

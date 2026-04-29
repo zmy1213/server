@@ -32,6 +32,7 @@ docs/BENCHMARK.md
 - 提供 Echo Server 示例
 - 提供 HTTP Server 示例
 - 支持最小 HTTP 请求解析和响应生成
+- 支持最小 C++ HTTP Client
 - 支持小根堆定时器和定时器取消
 - 支持空闲连接超时关闭
 - 支持 HTTP 路由表注册回调
@@ -81,6 +82,7 @@ docs/BENCHMARK.md
 │       │   ├── channel.h
 │       │   ├── connection.h
 │       │   ├── event_loop.h
+│       │   ├── http_client.h
 │       │   ├── poller.h
 │       │   ├── socket.h
 │       │   ├── timer_queue.h
@@ -98,6 +100,7 @@ docs/BENCHMARK.md
 │   │   ├── channel.cpp
 │   │   ├── connection.cpp
 │   │   ├── event_loop.cpp
+│   │   ├── http_client.cpp
 │   │   ├── poller.cpp
 │   │   ├── socket.cpp
 │   │   ├── timer_queue.cpp
@@ -121,6 +124,7 @@ metrics      把 ServerStats 转成文本或 Prometheus 格式
 channel      一个 fd 关心的事件和回调
 connection   单个客户端连接的读写状态
 event_loop   Reactor 事件循环，支持跨线程唤醒
+http_client  最小同步 HTTP 客户端
 poller       epoll/kqueue/select 的统一事件接口
 socket       跨平台 socket 封装
 timer_queue  小根堆定时器
@@ -240,6 +244,64 @@ warnings-as-errors 严格构建通过
 ```
 
 第 4 阶段已经完成第一版拆分；下一轮已经继续进入第 5 阶段：多线程 Reactor。
+
+## 最新代码说明：最小 C++ HTTP Client
+
+这一轮开始补“客户端”能力，加入了第一版最小 `C++ HTTP Client`。
+
+它现在能做什么：
+
+```text
+主动连接 HTTP 服务器
+发送 GET / POST 请求
+解析 HTTP/1.1 响应行、响应头、响应体
+返回 status_code / headers / body
+```
+
+当前流程：
+
+```text
+HttpClient::get("/health")
+        ↓
+创建 TCP socket
+        ↓
+connect() 连接目标服务器
+        ↓
+发送完整 HTTP 请求报文
+        ↓
+循环 recv() 读取响应字节
+        ↓
+try_parse_http_response() 判断响应是否完整
+        ↓
+拿到 HttpResponse 返回给调用者
+```
+
+这一版故意先保持简单：
+
+```text
+一个请求对应一个 TCP 连接
+当前是阻塞 connect / send / recv
+当前主要支持带 Content-Length 的响应
+还没有做 chunked 响应解析
+还没有做 async connect
+```
+
+小白理解：
+
+```text
+以前这个项目只会“当服务器”
+现在它也开始会“主动去请求别的 HTTP 服务器”
+```
+
+核心代码：
+
+```text
+include/cpp20_server/net/http_client.h
+src/net/http_client.cpp
+include/cpp20_server/protocol/http.h
+src/protocol/http.cpp
+tests/server_tests.cpp
+```
 
 ## 最新代码说明：EventLoop 唤醒机制
 
@@ -875,6 +937,7 @@ Config 配置解析
 AsyncLogger 异步写日志
 Metrics 指标格式化
 HTTP 请求解析
+HTTP 响应解析
 HTTP 响应生成和路由
 HTTP 半包处理
 HTTP 粘包处理
@@ -882,6 +945,8 @@ HTTP 粘包处理
 真实 TcpServer 单连接 Echo
 真实 TcpServer HTTP GET /health
 真实 TcpServer HTTP POST /echo
+真实 HttpClient HTTP GET /health
+真实 HttpClient HTTP POST /echo
 真实 TcpServer 64 客户端并发 Echo
 空闲连接 1 秒超时关闭
 worker_threads=2 的启动和回显
@@ -1112,7 +1177,7 @@ git remote set-url origin git@github.com:zmy1213/server.git
 
 1. 增加 Linux 百万连接参数调优文档
 2. 增加 Windows AcceptEx 批量异步接收连接
-3. 增加 C++ HTTP Client 和异步 connect
+3. 把最小 C++ HTTP Client 升级成异步 connect 和可取消请求
 4. 增加 GitHub Actions 跨平台构建测试
 
 ## 当前阶段说明
