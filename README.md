@@ -15,6 +15,7 @@ https://github.com/zmy1213/server
 ```text
 docs/HIGH_CONCURRENCY.md
 docs/LEARNING_ROADMAP.md
+docs/BENCHMARK.md
 ```
 
 ## 当前功能
@@ -36,6 +37,7 @@ docs/LEARNING_ROADMAP.md
 - 支持简单 `key=value` 配置文件
 - 支持异步日志
 - 支持运行指标文本和 Prometheus 风格输出
+- 支持 HTTP 压测脚本，统计 QPS、并发、延迟和错误数
 
 说明：百万级连接不是只靠 C++ 代码就能保证，还需要系统参数、内存、端口、压测机数量一起配合。这个项目的目标是使用各系统上适合高并发的 IO 模型：Linux 用 `epoll`，macOS 用 `kqueue`，Windows 用 `IOCP`。
 
@@ -59,6 +61,7 @@ docs/LEARNING_ROADMAP.md
 ├── CMakeLists.txt
 ├── README.md
 ├── docs/
+│   ├── BENCHMARK.md
 │   ├── HIGH_CONCURRENCY.md
 │   └── LEARNING_ROADMAP.md
 ├── examples/
@@ -100,8 +103,10 @@ docs/LEARNING_ROADMAP.md
 │   │   └── tcp_server.cpp
 │   └── protocol/
 │       └── http.cpp
-└── tests/
-    └── server_tests.cpp
+├── tests/
+│   └── server_tests.cpp
+└── tools/
+    └── bench_http.py
 ```
 
 核心模块说明：
@@ -122,6 +127,7 @@ tcp_server   TCP 服务器入口，Windows IOCP 也在这里实现
 protocol     HTTP 请求解析和响应生成
 examples     示例程序
 tests        自动化功能测试
+tools        压测和辅助脚本
 ```
 
 ## 本轮代码说明：Reactor 拆分
@@ -858,6 +864,68 @@ All tests passed.
 
 这轮测试还发现并修复了一个兼容性问题：`select` 后端在客户端半关闭写端后会把 EOF 报成可读事件，如果先处理读事件，可能导致已经准备好的回包来不及发送。现在 `Channel::handle_event()` 会优先处理写事件，再处理读事件。
 
+## 压测脚本
+
+这一轮新增 HTTP 压测脚本：
+
+```text
+tools/bench_http.py
+```
+
+先启动服务器：
+
+```bash
+./build/http_server --config examples/server.conf 127.0.0.1 18080 4 30
+```
+
+再运行压测：
+
+```bash
+python3 tools/bench_http.py --host 127.0.0.1 --port 18080 --path /health -c 50 -n 5000
+```
+
+脚本会输出：
+
+```text
+configured_concurrency  本次设置的并发 TCP 连接数
+successful_requests     成功请求数
+failed_requests         失败请求数
+error_rate_percent      错误率
+qps_success             每秒成功请求数
+latency_ms              min/avg/p50/p90/p95/p99/max 延迟
+status_codes            HTTP 状态码分布
+errors                  错误类型统计
+```
+
+更详细说明见：
+
+```text
+docs/BENCHMARK.md
+```
+
+本机 macOS / kqueue / 127.0.0.1 首轮压测结果：
+
+```text
+命令：
+python3 tools/bench_http.py --host 127.0.0.1 --port 18080 --path /health -c 50 -n 5000 --fail-on-error
+
+configured_concurrency: 50
+requested_requests: 5000
+successful_requests: 5000
+failed_requests: 0
+error_rate_percent: 0.00
+elapsed_seconds: 0.154
+qps_success: 32409.77
+latency_ms avg: 1.500
+latency_ms p50: 1.265
+latency_ms p90: 1.577
+latency_ms p95: 1.702
+latency_ms p99: 2.412
+latency_ms max: 22.472
+status_codes: 200=5000
+errors: none
+```
+
 ## 指定 IO 后端
 
 默认情况下项目会自动选择当前系统最合适的后端：
@@ -978,10 +1046,9 @@ git remote set-url origin git@github.com:zmy1213/server.git
 
 ## 后续开发计划
 
-1. 增加压测脚本
-2. 增加 Linux 百万连接参数调优文档
-3. 增加 Windows AcceptEx 批量异步接收连接
-4. 增加 GitHub Actions 跨平台构建测试
+1. 增加 Linux 百万连接参数调优文档
+2. 增加 Windows AcceptEx 批量异步接收连接
+3. 增加 GitHub Actions 跨平台构建测试
 
 ## 当前阶段说明
 

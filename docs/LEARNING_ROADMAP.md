@@ -1007,6 +1007,7 @@ HTTP 半包、粘包、同连接多请求处理第一版
 Config 配置文件第一版
 AsyncLogger 异步日志第一版
 Metrics 指标输出第一版
+HTTP 压测脚本第一版
 EventLoop / Channel / Acceptor / Connection 拆分
 多线程 Reactor 第一版
 TimerQueue 小根堆定时器第一版
@@ -1019,7 +1020,7 @@ TimerQueue 小根堆定时器第一版
 下一步最合理的是：
 
 ```text
-压测脚本
+Linux 百万连接参数调优文档
 ```
 
 原因是现在服务器已经有：
@@ -1035,10 +1036,14 @@ HTTP 基础协议
 指标
 ```
 
-下一步要用压测脚本把性能瓶颈测出来，再进入：
+接下来要把压测和系统参数连起来：
 
 ```text
-系统调优
+ulimit -n
+somaxconn
+tcp_max_syn_backlog
+端口范围
+内存估算
 ```
 
 不要跳着做。否则后面功能越多，代码越难维护。
