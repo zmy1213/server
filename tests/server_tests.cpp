@@ -1,6 +1,7 @@
 #include "cpp20_server/net/buffer.h"
 #include "cpp20_server/net/socket.h"
 #include "cpp20_server/net/tcp_server.h"
+#include "cpp20_server/net/timer_queue.h"
 
 #include <atomic>
 #include <chrono>
@@ -34,8 +35,10 @@ using cpp20_server::net::Buffer;
 using cpp20_server::net::SocketRuntime;
 using cpp20_server::net::TcpServer;
 using cpp20_server::net::TcpServerOptions;
+using cpp20_server::net::TimerQueue;
 using cpp20_server::net::close_socket;
 using cpp20_server::net::invalid_socket;
+using cpp20_server::net::is_would_block;
 using cpp20_server::net::last_socket_error;
 using cpp20_server::net::socket_t;
 
@@ -189,14 +192,27 @@ std::string echo_once(std::uint16_t port, std::string_view message) {
     }
 }
 
+bool wait_until_remote_close(socket_t fd) {
+    char buffer[1]{};
+    const auto n = ::recv(fd, buffer, sizeof(buffer), 0);
+    if (n == 0) {
+        return true;
+    }
+    if (n < 0) {
+        return !is_would_block(last_socket_error());
+    }
+    return false;
+}
+
 class RunningServer {
 public:
-    RunningServer(std::uint16_t port, std::size_t worker_threads)
+    RunningServer(std::uint16_t port, std::size_t worker_threads, std::uint64_t idle_timeout_seconds = 0)
         : port_(port) {
         TcpServerOptions options;
         options.host = "127.0.0.1";
         options.port = port;
         options.worker_threads = worker_threads;
+        options.idle_timeout_seconds = idle_timeout_seconds;
         server_ = std::make_unique<TcpServer>(std::move(options));
         server_->set_message_callback([](std::string_view message) {
             return std::string{message};
@@ -251,6 +267,27 @@ private:
     std::thread thread_;
     std::exception_ptr server_error_;
 };
+
+void test_timer_queue() {
+    TimerQueue timers;
+    int one_shot_count = 0;
+    int repeat_count = 0;
+
+    timers.run_after(std::chrono::milliseconds{0}, [&one_shot_count] {
+        ++one_shot_count;
+    });
+    timers.run_due_timers();
+    expect(one_shot_count == 1, "one-shot timer should fire once");
+
+    timers.run_every(std::chrono::milliseconds{1}, [&repeat_count] {
+        ++repeat_count;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    timers.run_due_timers();
+    std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    timers.run_due_timers();
+    expect(repeat_count >= 2, "repeat timer should fire more than once");
+}
 
 void test_buffer() {
     // 单元测试：只验证 Buffer 自己的读写位置和内容，不启动服务器。
@@ -322,6 +359,21 @@ void test_concurrent_echo() {
     expect(failures.load() == 0, "concurrent echo test had failures");
 }
 
+void test_idle_timeout_closes_inactive_connection() {
+    const std::uint16_t port = find_free_loopback_port();
+    RunningServer server{port, 2, 1};
+
+    socket_t fd = connect_to(port);
+    try {
+        const bool closed = wait_until_remote_close(fd);
+        close_socket(fd);
+        expect(closed, "idle connection should be closed by server");
+    } catch (...) {
+        close_socket(fd);
+        throw;
+    }
+}
+
 void run_test(std::string_view name, void (*test)()) {
     const auto start = std::chrono::steady_clock::now();
     test();
@@ -335,9 +387,11 @@ void run_test(std::string_view name, void (*test)()) {
 int main() {
     try {
         SocketRuntime runtime;
+        run_test("timer_queue", test_timer_queue);
         run_test("buffer", test_buffer);
         run_test("single_connection_echo", test_single_connection_echo);
         run_test("concurrent_echo", test_concurrent_echo);
+        run_test("idle_timeout", test_idle_timeout_closes_inactive_connection);
         std::cout << "All tests passed.\n";
         return 0;
     } catch (const std::exception& ex) {

@@ -13,8 +13,10 @@ EventLoop::~EventLoop() = default;
 void EventLoop::loop() {
     while (!stopping_.load()) {
         process_pending_tasks();
+        timer_queue_.run_due_timers();
 
-        auto fired_events = poller_.wait(std::chrono::milliseconds{50});
+        const auto timeout = timer_queue_.next_timeout(std::chrono::milliseconds{50});
+        auto fired_events = poller_.wait(timeout);
         for (const auto& fired : fired_events) {
             auto it = channels_.find(fired.fd);
             if (it == channels_.end() || it->second == nullptr) {
@@ -24,9 +26,11 @@ void EventLoop::loop() {
         }
 
         process_pending_tasks();
+        timer_queue_.run_due_timers();
     }
 
     process_pending_tasks();
+    timer_queue_.run_due_timers();
 }
 
 void EventLoop::stop() noexcept {
@@ -36,6 +40,18 @@ void EventLoop::stop() noexcept {
 void EventLoop::run_in_loop(Task task) {
     std::scoped_lock lock(pending_mutex_);
     pending_tasks_.push_back(std::move(task));
+}
+
+void EventLoop::run_after(std::chrono::milliseconds delay, Task task) {
+    run_in_loop([this, delay, task = std::move(task)]() mutable {
+        timer_queue_.run_after(delay, std::move(task));
+    });
+}
+
+void EventLoop::run_every(std::chrono::milliseconds interval, Task task) {
+    run_in_loop([this, interval, task = std::move(task)]() mutable {
+        timer_queue_.run_every(interval, std::move(task));
+    });
 }
 
 void EventLoop::update_channel(Channel& channel) {

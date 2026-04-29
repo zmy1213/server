@@ -46,6 +46,7 @@ endif()
 set(CPP20_SERVER_SOURCES
     src/net/buffer.cpp
     src/net/socket.cpp
+    src/net/timer_queue.cpp
     src/net/tcp_server.cpp
 )
 

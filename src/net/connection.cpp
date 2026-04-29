@@ -63,6 +63,7 @@ void Connection::set_bytes_written_callback(BytesCallback callback) {
 }
 
 void Connection::start() {
+    touch();
     channel_.enable_reading();
 }
 
@@ -83,11 +84,23 @@ socket_t Connection::fd() const noexcept {
     return fd_;
 }
 
+std::chrono::milliseconds Connection::idle_for(Clock::time_point now) const noexcept {
+    if (now <= last_active_at_) {
+        return std::chrono::milliseconds{0};
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now - last_active_at_);
+}
+
+void Connection::touch() noexcept {
+    last_active_at_ = Clock::now();
+}
+
 void Connection::handle_read() {
     std::array<char, read_buffer_size> buffer{};
     for (;;) {
         const auto n = ::recv(fd_, buffer.data(), safe_io_size(buffer.size()), 0);
         if (n > 0) {
+            touch();
             if (bytes_read_callback_) {
                 bytes_read_callback_(static_cast<std::size_t>(n));
             }
@@ -126,6 +139,7 @@ void Connection::handle_write() {
         const std::string_view data = output_.readable_view();
         const auto n = ::send(fd_, data.data(), safe_io_size(data.size()), send_flags());
         if (n > 0) {
+            touch();
             output_.retrieve(static_cast<std::size_t>(n));
             if (bytes_written_callback_) {
                 bytes_written_callback_(static_cast<std::size_t>(n));

@@ -857,6 +857,78 @@ Windows IOCP 流程代码定位：
 
 连接数越大，事件驱动优势越明显。
 
+## 为什么还要定时器
+
+高并发服务器不能只会接收连接，还必须会清理死连接。
+
+例如：
+
+```text
+客户端连上来了
+客户端断网了
+客户端进程崩了
+客户端长时间不发数据
+```
+
+如果服务端一直不清理，就会出现：
+
+```text
+连接对象一直在
+socket fd 一直占着
+Buffer 可能一直占着内存
+连接数越来越多
+最后新连接进不来
+```
+
+所以这一轮加入了第 7 阶段第一版：
+
+```text
+TimerQueue 小根堆定时器
+Connection 最后活跃时间
+idle_timeout_seconds 空闲超时配置
+空闲连接超时关闭
+```
+
+当前流程：
+
+```text
+客户端连接进来
+        ↓
+创建 Connection
+        ↓
+记录 last_active_at
+        ↓
+EventLoop 安排一个定时检查任务
+        ↓
+客户端 recv/send 成功时刷新 last_active_at
+        ↓
+定时器到期后检查空闲时间
+        ↓
+超过 idle_timeout_seconds 就关闭连接
+        ↓
+没有超过就继续安排下一次检查
+```
+
+对应代码：
+
+| 功能 | 代码位置 | 说明 |
+| --- | --- | --- |
+| 小根堆定时器 | [`include/cpp20_server/net/timer_queue.h`](../include/cpp20_server/net/timer_queue.h), [`src/net/timer_queue.cpp`](../src/net/timer_queue.cpp) | 保存定时任务，最早过期的任务先执行 |
+| EventLoop 执行定时器 | [`src/net/event_loop.cpp`](../src/net/event_loop.cpp) | 每轮事件循环前后执行到期定时器，并用最近定时器调整等待时间 |
+| 连接活跃时间 | [`include/cpp20_server/net/connection.h`](../include/cpp20_server/net/connection.h), [`src/net/connection.cpp`](../src/net/connection.cpp) | 每次读写成功后刷新 `last_active_at` |
+| 空闲超时配置 | [`include/cpp20_server/net/tcp_server.h`](../include/cpp20_server/net/tcp_server.h) | `idle_timeout_seconds=0` 表示不启用 |
+| Reactor 空闲关闭 | [`src/net/tcp_server.cpp`](../src/net/tcp_server.cpp) | 定时检查连接是否空闲太久 |
+| IOCP 空闲关闭 | [`src/net/tcp_server.cpp`](../src/net/tcp_server.cpp) | Windows 路线使用清理线程扫描空闲连接 |
+
+小白理解：
+
+```text
+epoll/kqueue/IOCP 解决“哪些连接有 IO 事件”
+TimerQueue 解决“哪些连接太久没动了”
+```
+
+这两个能力要配合起来，服务器才不会被大量空闲或死连接拖垮。
+
 ## 但是百万连接不只靠代码
 
 要跑到百万连接，还需要系统资源配合。
@@ -922,6 +994,14 @@ select 后端通过
 warnings-as-errors 严格构建通过
 ```
 
+新增定时器后，测试还覆盖：
+
+```text
+TimerQueue 单次定时任务
+TimerQueue 重复定时任务
+空闲连接 1 秒超时关闭
+```
+
 这轮测试还发现了一个很典型的事件顺序问题。
 
 现象：
@@ -965,7 +1045,6 @@ Channel::handle_event()
 
 ```text
 Windows AcceptEx 异步 accept
-连接超时回收
 异步日志
 HTTP 协议解析
 压测工具
@@ -985,7 +1064,6 @@ Linux/macOS 当前已经有多线程 Reactor 第一版：
 
 ```text
 EventLoop 跨线程唤醒机制
-连接定时器
 更完整的多线程压测
 ```
 

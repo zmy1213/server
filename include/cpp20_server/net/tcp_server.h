@@ -15,6 +15,7 @@ struct TcpServerOptions {
     int backlog{4096};
     std::size_t max_events{4096};
     std::size_t worker_threads{0};
+    std::uint64_t idle_timeout_seconds{0};
 };
 
 struct ServerStats {

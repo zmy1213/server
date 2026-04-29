@@ -380,6 +380,63 @@ TimerWheel
 适合大量连接的心跳和超时管理
 ```
 
+当前项目状态：这一阶段已经完成第一版。
+
+已经新增：
+
+```text
+TimerQueue
+连接最后活跃时间
+idle_timeout_seconds 配置
+空闲连接超时关闭
+```
+
+对应文件：
+
+```text
+include/cpp20_server/net/timer_queue.h
+src/net/timer_queue.cpp
+include/cpp20_server/net/event_loop.h
+src/net/event_loop.cpp
+include/cpp20_server/net/connection.h
+src/net/connection.cpp
+include/cpp20_server/net/tcp_server.h
+src/net/tcp_server.cpp
+```
+
+当前实现方式：
+
+```text
+TimerQueue 使用小根堆保存定时任务
+EventLoop 每轮循环先执行到期定时器
+Connection 每次 recv/send 成功后刷新 last_active_at
+TcpServer 给连接安排空闲检查任务
+连接空闲超过 idle_timeout_seconds 后关闭
+```
+
+启动示例：
+
+```bash
+./build/echo_server 0.0.0.0 8080 4 60
+```
+
+参数含义：
+
+```text
+0.0.0.0  监听所有网卡
+8080     监听端口
+4        worker 线程数
+60       空闲 60 秒自动关闭连接
+```
+
+当前测试覆盖：
+
+```text
+TimerQueue 单次定时任务
+TimerQueue 重复定时任务
+空闲连接 1 秒超时关闭
+```
+
 ## 第 8 阶段：日志、配置、指标
 
 工程化服务器必须有这些模块。
@@ -633,9 +690,11 @@ tests/server_tests.cpp
 当前测试覆盖：
 
 ```text
+TimerQueue 单次定时任务和重复定时任务
 Buffer 基础读写
 真实 TcpServer 单连接 Echo
 真实 TcpServer 64 客户端并发 Echo
+空闲连接 1 秒超时关闭
 worker_threads=2 的启动和回显
 worker_threads=4 的并发回显
 ```
@@ -841,6 +900,8 @@ Windows IOCP 主干代码
 Echo Server
 EventLoop / Channel / Acceptor / Connection 拆分
 多线程 Reactor 第一版
+TimerQueue 小根堆定时器第一版
+空闲连接超时关闭第一版
 自动化功能测试第一版
 高并发原理文档
 流程到代码定位文档
@@ -849,21 +910,20 @@ EventLoop / Channel / Acceptor / Connection 拆分
 下一步最合理的是：
 
 ```text
-第 7 阶段：定时器和连接超时回收
+第 6 阶段 / 第 13 阶段：HTTP 协议解析
 ```
 
-也就是给每个连接记录最后活跃时间，并定期关闭长时间没有读写的死连接：
+也就是先做一个最小 HTTP Server：
 
 ```text
-连接超时关闭
-心跳检测
-定时任务
+GET /
+GET /health
+POST /echo
 ```
 
-定时器之后，再进入：
+HTTP 之后，再进入：
 
 ```text
-HTTP
 压测
 系统调优
 ```

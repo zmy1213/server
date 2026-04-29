@@ -28,6 +28,8 @@ docs/LEARNING_ROADMAP.md
 - macOS 自动使用 `kqueue`
 - Windows 自动使用 `IOCP`
 - 提供 Echo Server 示例
+- 支持小根堆定时器
+- 支持空闲连接超时关闭
 
 说明：百万级连接不是只靠 C++ 代码就能保证，还需要系统参数、内存、端口、压测机数量一起配合。这个项目的目标是使用各系统上适合高并发的 IO 模型：Linux 用 `epoll`，macOS 用 `kqueue`，Windows 用 `IOCP`。
 
@@ -65,17 +67,19 @@ docs/LEARNING_ROADMAP.md
 │           ├── event_loop.h
 │           ├── poller.h
 │           ├── socket.h
+│           ├── timer_queue.h
 │           └── tcp_server.h
 ├── src/
-    └── net/
-        ├── acceptor.cpp
-        ├── buffer.cpp
-        ├── channel.cpp
-        ├── connection.cpp
-        ├── event_loop.cpp
-        ├── poller.cpp
-        ├── socket.cpp
-        └── tcp_server.cpp
+│   └── net/
+│       ├── acceptor.cpp
+│       ├── buffer.cpp
+│       ├── channel.cpp
+│       ├── connection.cpp
+│       ├── event_loop.cpp
+│       ├── poller.cpp
+│       ├── socket.cpp
+│       ├── timer_queue.cpp
+│       └── tcp_server.cpp
 └── tests/
     └── server_tests.cpp
 ```
@@ -90,6 +94,7 @@ connection   单个客户端连接的读写状态
 event_loop   Reactor 事件循环
 poller       epoll/kqueue/select 的统一事件接口
 socket       跨平台 socket 封装
+timer_queue  小根堆定时器
 tcp_server   TCP 服务器入口，Windows IOCP 也在这里实现
 examples     示例程序
 tests        自动化功能测试
@@ -303,7 +308,76 @@ warnings-as-errors 严格构建通过
 64 并发 echo 测试通过
 ```
 
-下一步建议进入第 7 阶段前的准备：先补定时器和连接超时回收。
+第 5 阶段已经完成第一版；下一步已经继续进入第 7 阶段：定时器和连接超时回收。
+
+## 最新代码说明：定时器和空闲连接回收
+
+这一轮代码完成了第 7 阶段的第一版：小根堆定时器和空闲连接超时关闭。
+
+为什么需要它：
+
+```text
+客户端断网或长时间不发数据
+        ↓
+连接对象还在服务器里
+        ↓
+fd 和内存一直占着
+        ↓
+连接越积越多，最终拖垮服务器
+```
+
+现在可以配置：
+
+```text
+idle_timeout_seconds=0  不启用空闲超时
+idle_timeout_seconds>0  连接空闲超过这个秒数后关闭
+```
+
+核心新增：
+
+```text
+TimerQueue
+    使用小根堆保存定时任务
+    最早过期的任务永远在堆顶
+
+EventLoop
+    每轮循环检查到期定时器
+    根据最近定时器调整 poller.wait() 的等待时间
+
+Connection
+    每次 recv/send 成功后刷新最后活跃时间
+
+TcpServer
+    定时检查连接是否超过 idle_timeout_seconds
+    超时后主动关闭连接
+```
+
+相关代码：
+
+```text
+include/cpp20_server/net/timer_queue.h
+src/net/timer_queue.cpp
+include/cpp20_server/net/event_loop.h
+src/net/event_loop.cpp
+include/cpp20_server/net/connection.h
+src/net/connection.cpp
+src/net/tcp_server.cpp
+```
+
+启动时指定空闲超时：
+
+```bash
+./build/echo_server 0.0.0.0 8080 4 60
+```
+
+参数含义：
+
+```text
+第 1 个参数：监听地址
+第 2 个参数：监听端口
+第 3 个参数：worker_threads，0 表示自动使用 CPU 核数
+第 4 个参数：idle_timeout_seconds，0 表示不启用空闲超时
+```
 
 如果你想先理解为什么这种结构能支撑高并发，可以先看：
 
@@ -378,6 +452,12 @@ cmake --build build --config Release
 ./build/echo_server 0.0.0.0 8080 4
 ```
 
+指定 worker 线程数和空闲超时时间：
+
+```bash
+./build/echo_server 0.0.0.0 8080 4 60
+```
+
 本机测试：
 
 ```bash
@@ -428,6 +508,12 @@ cmake --build build --config Release
 .\build\Release\echo_server.exe 0.0.0.0 8080 4
 ```
 
+指定 worker 线程数和空闲超时时间：
+
+```powershell
+.\build\Release\echo_server.exe 0.0.0.0 8080 4 60
+```
+
 如果使用单配置生成器，比如 MinGW，也可能是：
 
 ```powershell
@@ -459,9 +545,11 @@ ctest --test-dir build --output-on-failure
 当前测试覆盖：
 
 ```text
+TimerQueue 单次定时任务和重复定时任务
 Buffer 基础读写
 真实 TcpServer 单连接 Echo
 真实 TcpServer 64 客户端并发 Echo
+空闲连接 1 秒超时关闭
 worker_threads=2 的启动和回显
 worker_threads=4 的并发回显
 ```
@@ -477,11 +565,14 @@ warnings-as-errors 严格构建：100% tests passed, 0 tests failed out of 1
 直接运行 `./build/server_tests` 的输出示例：
 
 ```text
+[PASS] timer_queue (5 ms)
 [PASS] buffer (0 ms)
-listening on 127.0.0.1:57323 backend=kqueue worker_threads=2
-[PASS] single_connection_echo (101 ms)
-listening on 127.0.0.1:57326 backend=kqueue worker_threads=4
+listening on 127.0.0.1:59634 backend=kqueue worker_threads=2
+[PASS] single_connection_echo (102 ms)
+listening on 127.0.0.1:59637 backend=kqueue worker_threads=4
 [PASS] concurrent_echo (104 ms)
+listening on 127.0.0.1:59704 backend=kqueue worker_threads=2
+[PASS] idle_timeout (1101 ms)
 All tests passed.
 ```
 
@@ -607,14 +698,13 @@ git remote set-url origin git@github.com:zmy1213/server.git
 
 ## 后续开发计划
 
-1. 增加定时器和空闲连接回收
-2. 增加 HTTP 协议解析
-3. 增加异步日志
-4. 增加压测脚本
-5. 增加 Linux 百万连接参数调优文档
-6. 增加 Windows AcceptEx 批量异步接收连接
-7. 增加 GitHub Actions 跨平台构建测试
-8. 增加更大规模并发压测客户端
+1. 增加 HTTP 协议解析
+2. 增加异步日志
+3. 增加压测脚本
+4. 增加 Linux 百万连接参数调优文档
+5. 增加 Windows AcceptEx 批量异步接收连接
+6. 增加 GitHub Actions 跨平台构建测试
+7. 增加更大规模并发压测客户端
 
 ## 当前阶段说明
 

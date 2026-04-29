@@ -2,8 +2,10 @@
 
 #include "cpp20_server/net/poller.h"
 #include "cpp20_server/net/socket.h"
+#include "cpp20_server/net/timer_queue.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <mutex>
@@ -29,6 +31,8 @@ public:
     void loop();
     void stop() noexcept;
     void run_in_loop(Task task);
+    void run_after(std::chrono::milliseconds delay, Task task);
+    void run_every(std::chrono::milliseconds interval, Task task);
 
     void update_channel(Channel& channel);
     void remove_channel(Channel& channel);
@@ -39,6 +43,7 @@ private:
     void process_pending_tasks();
 
     Poller poller_;
+    TimerQueue timer_queue_;
     std::unordered_map<socket_t, Channel*> channels_;
     std::mutex pending_mutex_;
     std::vector<Task> pending_tasks_;

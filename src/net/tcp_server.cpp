@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -31,6 +32,19 @@ namespace {
 
 #if defined(CPP20_SERVER_USE_IOCP)
 constexpr std::size_t read_buffer_size = 64 * 1024;
+#endif
+
+std::chrono::milliseconds idle_timeout(const TcpServerOptions& options) noexcept {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::seconds{options.idle_timeout_seconds});
+}
+
+#if defined(CPP20_SERVER_USE_IOCP)
+std::int64_t steady_now_milliseconds() noexcept {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 #endif
 
 } // namespace
@@ -68,6 +82,7 @@ public:
         }
 
         start_workers();
+        start_idle_cleaner();
         accept_thread_ = std::thread([this] { accept_loop(); });
 
         std::cout << "listening on " << options_.host << ':' << options_.port
@@ -130,6 +145,8 @@ private:
         IoContext send_context{};
         std::atomic_int pending_operations{0};
         std::atomic_bool closing{false};
+        std::atomic_bool socket_closed{false};
+        std::atomic<std::int64_t> last_active_ms{0};
     };
 
     void start_workers() {
@@ -145,6 +162,9 @@ private:
     void join_threads() {
         if (accept_thread_.joinable()) {
             accept_thread_.join();
+        }
+        if (idle_cleaner_thread_.joinable()) {
+            idle_cleaner_thread_.join();
         }
         for (auto& worker : worker_threads_) {
             if (worker.joinable()) {
@@ -190,6 +210,7 @@ private:
     void register_connection(socket_t client) {
         auto connection = std::make_unique<Connection>();
         connection->fd = client;
+        connection->last_active_ms.store(steady_now_milliseconds(), std::memory_order_relaxed);
         auto* raw = connection.get();
 
         HANDLE associated = CreateIoCompletionPort(reinterpret_cast<HANDLE>(client),
@@ -291,14 +312,15 @@ private:
                 continue;
             }
 
-            const bool connection_closed = !ok || transferred == 0;
+            const bool connection_closed = !ok || transferred == 0 || connection->socket_closed.load();
             if (connection_closed) {
-                finish_operation(connection);
                 close_connection(connection);
+                finish_operation(connection);
                 continue;
             }
 
             if (context->operation == IoOperation::recv) {
+                connection->last_active_ms.store(steady_now_milliseconds(), std::memory_order_relaxed);
                 {
                     std::scoped_lock lock(stats_mutex_);
                     stats_.bytes_read += transferred;
@@ -311,6 +333,7 @@ private:
             }
 
             if (context->operation == IoOperation::send) {
+                connection->last_active_ms.store(steady_now_milliseconds(), std::memory_order_relaxed);
                 {
                     std::scoped_lock lock(stats_mutex_);
                     stats_.bytes_written += transferred;
@@ -318,6 +341,45 @@ private:
                 finish_operation(connection);
                 post_recv(connection);
             }
+        }
+    }
+
+    void start_idle_cleaner() {
+        if (options_.idle_timeout_seconds == 0) {
+            return;
+        }
+        idle_cleaner_thread_ = std::thread([this] { idle_cleaner_loop(); });
+    }
+
+    void idle_cleaner_loop() {
+        while (!stopping_.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{200});
+            close_idle_connections();
+        }
+    }
+
+    void close_idle_connections() noexcept {
+        const auto timeout = idle_timeout(options_);
+        if (timeout <= std::chrono::milliseconds{0}) {
+            return;
+        }
+
+        const auto timeout_ms = timeout.count();
+        const auto now_ms = steady_now_milliseconds();
+
+        std::scoped_lock lock(connections_mutex_);
+        for (auto& [_, connection] : connections_) {
+            if (!connection || connection->closing.load()) {
+                continue;
+            }
+            const auto last_active = connection->last_active_ms.load(std::memory_order_relaxed);
+            if (now_ms - last_active < timeout_ms) {
+                continue;
+            }
+            if (connection->socket_closed.load()) {
+                continue;
+            }
+            close_connection_socket(connection);
         }
     }
 
@@ -336,9 +398,19 @@ private:
 
         const bool was_closing = connection->closing.exchange(true);
         if (!was_closing) {
-            close_socket(connection->fd);
+            close_connection_socket(connection);
         }
         destroy_if_idle(connection);
+    }
+
+    void close_connection_socket(Connection* connection) noexcept {
+        if (connection == nullptr) {
+            return;
+        }
+        const bool was_closed = connection->socket_closed.exchange(true);
+        if (!was_closed) {
+            close_socket(connection->fd);
+        }
     }
 
     void destroy_if_idle(Connection* connection) noexcept {
@@ -360,7 +432,7 @@ private:
     void close_all_connections() noexcept {
         std::scoped_lock lock(connections_mutex_);
         for (auto& [_, connection] : connections_) {
-            close_socket(connection->fd);
+            close_connection_socket(connection.get());
         }
         connections_.clear();
         stats_.active_connections = 0;
@@ -376,6 +448,7 @@ private:
     std::atomic_bool stopping_{false};
     std::size_t worker_count_{0};
     std::thread accept_thread_;
+    std::thread idle_cleaner_thread_;
     std::vector<std::thread> worker_threads_;
     std::mutex connections_mutex_;
     std::unordered_map<socket_t, std::unique_ptr<Connection>> connections_;
@@ -510,6 +583,48 @@ private:
             stats_.active_connections = static_cast<std::uint64_t>(connections_.size());
         }
         raw->start();
+        schedule_idle_check(loop, client_fd);
+    }
+
+    void schedule_idle_check(EventLoop& loop, socket_t fd) {
+        const auto timeout = idle_timeout(options_);
+        if (timeout <= std::chrono::milliseconds{0}) {
+            return;
+        }
+
+        loop.run_after(timeout, [this, &loop, fd] {
+            check_idle_connection(loop, fd);
+        });
+    }
+
+    void check_idle_connection(EventLoop& loop, socket_t fd) {
+        const auto timeout = idle_timeout(options_);
+        if (timeout <= std::chrono::milliseconds{0}) {
+            return;
+        }
+
+        std::chrono::milliseconds idle{0};
+        {
+            std::scoped_lock lock(connections_mutex_);
+            auto it = connections_.find(fd);
+            if (it == connections_.end()) {
+                return;
+            }
+            idle = it->second->idle_for(Connection::Clock::now());
+        }
+
+        if (idle >= timeout) {
+            close_connection(fd);
+            return;
+        }
+
+        auto remaining = timeout - idle;
+        if (remaining <= std::chrono::milliseconds{0}) {
+            remaining = std::chrono::milliseconds{1};
+        }
+        loop.run_after(remaining, [this, &loop, fd] {
+            check_idle_connection(loop, fd);
+        });
     }
 
     void close_connection(socket_t fd) noexcept {

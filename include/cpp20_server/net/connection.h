@@ -4,6 +4,7 @@
 #include "cpp20_server/net/channel.h"
 #include "cpp20_server/net/socket.h"
 
+#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <string>
@@ -16,6 +17,7 @@ class EventLoop;
 // Connection owns one client socket and its read/write state.
 class Connection {
 public:
+    using Clock = std::chrono::steady_clock;
     using MessageCallback = std::function<std::string(std::string_view message)>;
     using CloseCallback = std::function<void(socket_t fd)>;
     using BytesCallback = std::function<void(std::size_t bytes)>;
@@ -35,8 +37,10 @@ public:
     void close() noexcept;
 
     [[nodiscard]] socket_t fd() const noexcept;
+    [[nodiscard]] std::chrono::milliseconds idle_for(Clock::time_point now) const noexcept;
 
 private:
+    void touch() noexcept;
     void handle_read();
     void handle_write();
     void handle_peer_close();
@@ -48,6 +52,7 @@ private:
     socket_t fd_{invalid_socket};
     Channel channel_;
     Buffer output_;
+    Clock::time_point last_active_at_{Clock::now()};
     bool close_after_write_{false};
     MessageCallback message_callback_;
     CloseCallback close_callback_;

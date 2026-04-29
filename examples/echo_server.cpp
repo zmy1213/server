@@ -33,6 +33,14 @@ std::size_t parse_worker_threads(const char* value) {
     return static_cast<std::size_t>(count);
 }
 
+std::uint64_t parse_idle_timeout_seconds(const char* value) {
+    const long seconds = std::strtol(value, nullptr, 10);
+    if (seconds < 0) {
+        throw std::runtime_error("idle_timeout_seconds must be greater than or equal to 0");
+    }
+    return static_cast<std::uint64_t>(seconds);
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -46,6 +54,9 @@ int main(int argc, char* argv[]) {
         }
         if (argc >= 4) {
             options.worker_threads = parse_worker_threads(argv[3]);
+        }
+        if (argc >= 5) {
+            options.idle_timeout_seconds = parse_idle_timeout_seconds(argv[4]);
         }
 
         cpp20_server::net::TcpServer server{options};
