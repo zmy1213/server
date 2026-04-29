@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -698,6 +699,57 @@ void test_http_client_post() {
     expect(response.body == "client-body", "http client POST /echo should echo request body");
 }
 
+void test_http_client_async_connect_success() {
+    const std::uint16_t port = find_free_loopback_port();
+    RunningServer server{port, 2};
+
+    HttpClientOptions options;
+    options.host = "127.0.0.1";
+    options.port = port;
+    HttpClient client{options};
+
+    auto promise = std::make_shared<std::promise<std::pair<std::error_code, socket_t>>>();
+    auto future = promise->get_future();
+    client.connect_async([promise](std::error_code error, socket_t fd) {
+        promise->set_value({error, fd});
+    });
+
+    const auto status = future.wait_for(std::chrono::seconds{2});
+    expect(status == std::future_status::ready, "async connect success callback should arrive");
+
+    auto [error, fd] = future.get();
+    if (fd != invalid_socket) {
+        close_socket(fd);
+    }
+    expect(!error, "async connect to a listening server should succeed");
+    expect(fd != invalid_socket, "async connect success should return a valid socket");
+}
+
+void test_http_client_async_connect_failure() {
+    const std::uint16_t port = find_free_loopback_port();
+
+    HttpClientOptions options;
+    options.host = "127.0.0.1";
+    options.port = port;
+    HttpClient client{options};
+
+    auto promise = std::make_shared<std::promise<std::pair<std::error_code, socket_t>>>();
+    auto future = promise->get_future();
+    client.connect_async([promise](std::error_code error, socket_t fd) {
+        promise->set_value({error, fd});
+    }, std::chrono::milliseconds{500});
+
+    const auto status = future.wait_for(std::chrono::seconds{2});
+    expect(status == std::future_status::ready, "async connect failure callback should arrive");
+
+    auto [error, fd] = future.get();
+    if (fd != invalid_socket) {
+        close_socket(fd);
+    }
+    expect(static_cast<bool>(error), "async connect to a closed port should fail");
+    expect(fd == invalid_socket, "async connect failure should not return a socket");
+}
+
 void test_http_server_partial_request() {
     const std::uint16_t port = find_free_loopback_port();
     RunningServer server{port, 2, 0, TcpServer::StreamCallback{[](Buffer& input, Buffer& output) {
@@ -864,6 +916,8 @@ int main() {
         run_test("http_server_post_echo", test_http_server_post_echo);
         run_test("http_client_get", test_http_client_get);
         run_test("http_client_post", test_http_client_post);
+        run_test("http_client_async_connect_success", test_http_client_async_connect_success);
+        run_test("http_client_async_connect_failure", test_http_client_async_connect_failure);
         run_test("http_server_partial_request", test_http_server_partial_request);
         run_test("http_server_sticky_requests", test_http_server_sticky_requests);
         run_test("http_server_same_connection", test_http_server_multiple_requests_same_connection);

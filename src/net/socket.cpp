@@ -57,6 +57,43 @@ bool is_interrupted(std::error_code error) noexcept {
 #endif
 }
 
+bool is_connect_in_progress(std::error_code error) noexcept {
+#if defined(_WIN32)
+    return error.value() == WSAEWOULDBLOCK
+           || error.value() == WSAEINPROGRESS
+           || error.value() == WSAEALREADY;
+#else
+    return error.value() == EINPROGRESS || error.value() == EALREADY;
+#endif
+}
+
+std::error_code socket_pending_error(socket_t fd) noexcept {
+    if (fd == invalid_socket) {
+        return std::make_error_code(std::errc::bad_file_descriptor);
+    }
+
+    int value = 0;
+#if defined(_WIN32)
+    int length = sizeof(value);
+    if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&value), &length) != 0) {
+        return last_socket_error();
+    }
+    if (value == 0) {
+        return {};
+    }
+    return {value, std::system_category()};
+#else
+    socklen_t length = sizeof(value);
+    if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &value, &length) != 0) {
+        return last_socket_error();
+    }
+    if (value == 0) {
+        return {};
+    }
+    return {value, std::generic_category()};
+#endif
+}
+
 void close_socket(socket_t fd) noexcept {
     if (fd == invalid_socket) {
         return;

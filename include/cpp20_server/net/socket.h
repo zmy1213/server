@@ -40,6 +40,8 @@ public:
 [[nodiscard]] std::error_code last_socket_error() noexcept;
 [[nodiscard]] bool is_would_block(std::error_code error) noexcept;
 [[nodiscard]] bool is_interrupted(std::error_code error) noexcept;
+[[nodiscard]] bool is_connect_in_progress(std::error_code error) noexcept;
+[[nodiscard]] std::error_code socket_pending_error(socket_t fd) noexcept;
 
 void close_socket(socket_t fd) noexcept;
 void set_non_blocking(socket_t fd);

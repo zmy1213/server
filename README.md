@@ -33,6 +33,7 @@ docs/BENCHMARK.md
 - 提供 HTTP Server 示例
 - 支持最小 HTTP 请求解析和响应生成
 - 支持最小 C++ HTTP Client
+- 支持第一版 async connect
 - 支持小根堆定时器和定时器取消
 - 支持空闲连接超时关闭
 - 支持 HTTP 路由表注册回调
@@ -276,14 +277,13 @@ try_parse_http_response() 判断响应是否完整
 拿到 HttpResponse 返回给调用者
 ```
 
-这一版故意先保持简单：
+第一版同步客户端的边界：
 
 ```text
 一个请求对应一个 TCP 连接
 当前是阻塞 connect / send / recv
 当前主要支持带 Content-Length 的响应
 还没有做 chunked 响应解析
-还没有做 async connect
 ```
 
 小白理解：
@@ -300,6 +300,62 @@ include/cpp20_server/net/http_client.h
 src/net/http_client.cpp
 include/cpp20_server/protocol/http.h
 src/protocol/http.cpp
+tests/server_tests.cpp
+```
+
+## 最新代码说明：HttpClient async connect
+
+这一轮继续把客户端往前推了一步，补上了第一版 `async connect`。
+
+它现在的思路是：
+
+```text
+调用 connect_async(callback)
+        ↓
+后台线程启动
+        ↓
+socket 设置成 non-blocking
+        ↓
+调用 connect()
+        ↓
+如果返回 in-progress
+        ↓
+select() 等待 socket 变成可写
+        ↓
+getsockopt(SO_ERROR) 判断最终是连上还是失败
+        ↓
+回调把 error 和 socket 返回给调用者
+```
+
+这一版要注意两件事：
+
+```text
+connect 本身已经是非阻塞 socket 连接
+但回调当前仍然由后台线程触发，不是 EventLoop 线程
+```
+
+所以它解决的是：
+
+```text
+主线程不用傻等 connect() 完成
+可以在连接成功或失败后异步收到结果
+```
+
+这一版还没做的：
+
+```text
+还没有把整个 HTTP request/response 做成全异步
+还没有做请求取消
+还没有做连接复用
+```
+
+核心代码：
+
+```text
+include/cpp20_server/net/http_client.h
+src/net/http_client.cpp
+include/cpp20_server/net/socket.h
+src/net/socket.cpp
 tests/server_tests.cpp
 ```
 
@@ -947,6 +1003,8 @@ HTTP 粘包处理
 真实 TcpServer HTTP POST /echo
 真实 HttpClient HTTP GET /health
 真实 HttpClient HTTP POST /echo
+HttpClient async connect 成功回调
+HttpClient async connect 失败回调
 真实 TcpServer 64 客户端并发 Echo
 空闲连接 1 秒超时关闭
 worker_threads=2 的启动和回显
@@ -1177,7 +1235,7 @@ git remote set-url origin git@github.com:zmy1213/server.git
 
 1. 增加 Linux 百万连接参数调优文档
 2. 增加 Windows AcceptEx 批量异步接收连接
-3. 把最小 C++ HTTP Client 升级成异步 connect 和可取消请求
+3. 在 async connect 基础上增加可取消异步请求
 4. 增加 GitHub Actions 跨平台构建测试
 
 ## 当前阶段说明

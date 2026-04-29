@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #if defined(_WIN32)
@@ -15,6 +16,7 @@
 #include <ws2tcpip.h>
 #else
 #include <netdb.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #endif
 
@@ -71,6 +73,40 @@ int send_flags() noexcept {
 int safe_io_size(std::size_t value) noexcept {
     const auto max_value = static_cast<std::size_t>(std::numeric_limits<int>::max());
     return static_cast<int>(std::min(value, max_value));
+}
+
+std::error_code connect_timeout_error() {
+    return std::make_error_code(std::errc::timed_out);
+}
+
+bool wait_until_writable(socket_t fd, std::chrono::milliseconds timeout, std::error_code& error) {
+    fd_set write_set;
+    fd_set except_set;
+    FD_ZERO(&write_set);
+    FD_ZERO(&except_set);
+    FD_SET(fd, &write_set);
+    FD_SET(fd, &except_set);
+
+    timeval tv{};
+    tv.tv_sec = static_cast<long>(timeout.count() / 1000);
+    tv.tv_usec = static_cast<long>((timeout.count() % 1000) * 1000);
+
+#if defined(_WIN32)
+    const int ready = ::select(0, nullptr, &write_set, &except_set, &tv);
+#else
+    const int ready = ::select(fd + 1, nullptr, &write_set, &except_set, &tv);
+#endif
+    if (ready > 0) {
+        error = socket_pending_error(fd);
+        return !error;
+    }
+    if (ready == 0) {
+        error = connect_timeout_error();
+        return false;
+    }
+
+    error = last_socket_error();
+    return false;
 }
 
 std::string host_header_value(std::string_view host, std::uint16_t port) {
@@ -159,6 +195,72 @@ socket_t connect_socket(std::string_view host, std::uint16_t port, const HttpCli
     throw std::system_error(last_error, "http client connect failed");
 }
 
+socket_t connect_socket_async(std::string_view host,
+                              std::uint16_t port,
+                              std::chrono::milliseconds timeout,
+                              std::error_code& error) {
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    addrinfo* raw_result = nullptr;
+    std::string host_text{host};
+    std::string port_text = std::to_string(port);
+    const int rc = ::getaddrinfo(host_text.c_str(), port_text.c_str(), &hints, &raw_result);
+    if (rc != 0) {
+        error = std::make_error_code(std::errc::host_unreachable);
+        return invalid_socket;
+    }
+
+    std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> result{raw_result, freeaddrinfo};
+    for (addrinfo* current = result.get(); current != nullptr; current = current->ai_next) {
+        socket_t fd = ::socket(current->ai_family, current->ai_socktype, current->ai_protocol);
+        if (fd == invalid_socket) {
+            error = last_socket_error();
+            continue;
+        }
+
+        try {
+            set_non_blocking(fd);
+        } catch (...) {
+            close_socket(fd);
+            throw;
+        }
+
+        if (::connect(fd, current->ai_addr, static_cast<int>(current->ai_addrlen)) == 0) {
+            try {
+                set_no_delay(fd);
+                error.clear();
+                return fd;
+            } catch (...) {
+                close_socket(fd);
+                throw;
+            }
+        }
+
+        error = last_socket_error();
+        if (is_connect_in_progress(error) || is_would_block(error)) {
+            std::error_code wait_error;
+            if (wait_until_writable(fd, timeout, wait_error)) {
+                try {
+                    set_no_delay(fd);
+                    error.clear();
+                    return fd;
+                } catch (...) {
+                    close_socket(fd);
+                    throw;
+                }
+            }
+            error = wait_error;
+        }
+
+        close_socket(fd);
+    }
+
+    return invalid_socket;
+}
+
 void send_all(socket_t fd, std::string_view data) {
     std::size_t sent = 0;
     while (sent < data.size()) {
@@ -211,10 +313,38 @@ protocol::HttpResponse recv_response(socket_t fd) {
 
 } // namespace
 
-HttpClient::HttpClient(HttpClientOptions options) : options_(std::move(options)) {}
+HttpClient::HttpClient(HttpClientOptions options)
+    : runtime_(std::make_shared<SocketRuntime>()),
+      options_(std::move(options)) {}
 
 const HttpClientOptions& HttpClient::options() const noexcept {
     return options_;
+}
+
+void HttpClient::connect_async(ConnectCallback callback, std::chrono::milliseconds timeout) const {
+    if (!callback) {
+        return;
+    }
+
+    const auto options = options_;
+    const auto runtime = runtime_;
+    std::thread([callback = std::move(callback), options, runtime = std::move(runtime), timeout]() mutable {
+        (void)runtime;
+        std::error_code error;
+        socket_t fd = invalid_socket;
+
+        try {
+            fd = connect_socket_async(options.host, options.port, timeout, error);
+        } catch (const std::system_error& ex) {
+            error = ex.code();
+            fd = invalid_socket;
+        } catch (...) {
+            error = std::make_error_code(std::errc::io_error);
+            fd = invalid_socket;
+        }
+
+        callback(error, fd);
+    }).detach();
 }
 
 protocol::HttpResponse HttpClient::request(const protocol::HttpRequest& request) const {

@@ -1142,13 +1142,13 @@ curl http://127.0.0.1:8080/metrics
 
 这一轮开始补“客户端”能力，也就是程序主动去请求别的 HTTP 服务。
 
-当前这版 `HttpClient` 是最小同步版本：
+当前这版 `HttpClient` 已经分成两层：
 
 ```text
 一个请求对应一个 TCP 连接
-当前使用阻塞 connect / send / recv
+同步 request() 仍然使用阻塞 connect / send / recv
+connect_async() 已经改成 non-blocking connect
 当前主要支持 Content-Length 响应
-当前还没有实现 async connect
 当前还没有实现 chunked 响应解析
 ```
 
@@ -1168,11 +1168,20 @@ try_parse_http_response() 判断响应是否完整
 返回 HttpResponse
 ```
 
+这一版 `async connect` 还有一个教学上的取舍：
+
+```text
+socket 连接本身已经改成 non-blocking
+但 callback 目前是后台线程触发
+还不是完全基于 EventLoop 的客户端异步状态机
+```
+
 对应代码：
 
 | 功能 | 代码位置 | 说明 |
 | --- | --- | --- |
 | HTTP Client 对外接口 | [`include/cpp20_server/net/http_client.h`](../include/cpp20_server/net/http_client.h), [`src/net/http_client.cpp`](../src/net/http_client.cpp) | `get()` / `post()` / `request()` 负责发请求和收响应 |
+| async connect 第一版 | [`include/cpp20_server/net/http_client.h`](../include/cpp20_server/net/http_client.h), [`src/net/http_client.cpp`](../src/net/http_client.cpp) | `connect_async()` 使用 non-blocking socket + `select()` 等待连接完成 |
 | HTTP 响应解析 | [`include/cpp20_server/protocol/http.h`](../include/cpp20_server/protocol/http.h), [`src/protocol/http.cpp`](../src/protocol/http.cpp) | 解析状态行、响应头、响应体 |
 | 客户端集成测试 | [`tests/server_tests.cpp`](../tests/server_tests.cpp) | 启动真实 `TcpServer`，再用 `HttpClient` 发 `GET` / `POST` |
 
@@ -1284,6 +1293,8 @@ EventLoop 跨线程唤醒
 启动真实 TcpServer 验证 HTTP POST /echo
 启动真实 HttpClient 验证 HTTP GET /health
 启动真实 HttpClient 验证 HTTP POST /echo
+验证 HttpClient async connect 成功回调
+验证 HttpClient async connect 失败回调
 启动真实 TcpServer 验证 64 个客户端并发 Echo
 验证空闲连接 1 秒超时关闭
 ```
@@ -1347,7 +1358,6 @@ Channel::handle_event()
 
 ```text
 Windows AcceptEx 异步 accept
-异步 connect
 std::stop_token 风格的可取消任务接口
 更细粒度的定时器取消和连接取消语义
 百万连接调优脚本

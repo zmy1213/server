@@ -5,6 +5,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -22,10 +24,18 @@ struct HttpClientOptions {
 // Content-Length based responses.
 class HttpClient {
 public:
+    using ConnectCallback = std::function<void(std::error_code error, socket_t fd)>;
+
     explicit HttpClient(HttpClientOptions options = {});
 
     [[nodiscard]] const HttpClientOptions& options() const noexcept;
 
+    // First async-connect version:
+    // - callback runs on a background thread
+    // - caller owns fd on success and must close it
+    // - fd is invalid_socket on failure
+    void connect_async(ConnectCallback callback,
+                       std::chrono::milliseconds timeout = std::chrono::milliseconds{3000}) const;
     protocol::HttpResponse request(const protocol::HttpRequest& request) const;
     protocol::HttpResponse get(std::string_view path) const;
     protocol::HttpResponse post(std::string_view path,
@@ -33,7 +43,7 @@ public:
                                 std::string_view content_type = "text/plain; charset=utf-8") const;
 
 private:
-    SocketRuntime runtime_;
+    std::shared_ptr<SocketRuntime> runtime_;
     HttpClientOptions options_;
 };
 
