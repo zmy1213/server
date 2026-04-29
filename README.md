@@ -10,6 +10,12 @@
 https://github.com/zmy1213/server
 ```
 
+原理文档：
+
+```text
+docs/HIGH_CONCURRENCY.md
+```
+
 ## 当前功能
 
 - 使用 C++20 编写
@@ -43,6 +49,8 @@ https://github.com/zmy1213/server
 .
 ├── CMakeLists.txt
 ├── README.md
+├── docs/
+│   └── HIGH_CONCURRENCY.md
 ├── examples/
 │   └── echo_server.cpp
 ├── include/
@@ -68,6 +76,12 @@ socket      跨平台 socket 封装
 poller      epoll/kqueue/select 的统一事件接口
 tcp_server  TCP 服务器主逻辑，Windows IOCP 也在这里实现
 examples    示例程序
+```
+
+如果你想先理解为什么这种结构能支撑高并发，可以先看：
+
+```text
+docs/HIGH_CONCURRENCY.md
 ```
 
 ## 小白先看：epoll / kqueue / IOCP 是什么
