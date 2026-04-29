@@ -27,6 +27,10 @@ std::size_t normalize_max_events(std::size_t max_events) {
 
 #if defined(CPP20_SERVER_USE_EPOLL)
 
+// epoll is Linux's scalable socket event system.
+// You register sockets once with epoll_ctl(), then epoll_wait() returns only
+// the sockets that currently have work to do. This avoids scanning every
+// connection and is the normal Linux path for very high connection counts.
 std::uint32_t to_epoll_events(Event events) {
     std::uint32_t value = 0;
     if (has_event(events, Event::read)) {
@@ -116,6 +120,9 @@ public:
             throw std::system_error(last_socket_error(), "epoll_ctl(ADD) failed");
         }
 #elif defined(CPP20_SERVER_USE_KQUEUE)
+        // kqueue is the BSD/macOS equivalent idea to epoll:
+        // register filters such as EVFILT_READ / EVFILT_WRITE, then kevent()
+        // waits until the kernel reports that some socket is ready.
         apply_kqueue_events(fd, events);
 #else
         check_select_fd(fd);
@@ -250,6 +257,9 @@ private:
 #endif
 
 #if defined(CPP20_SERVER_USE_SELECT)
+    // select is the oldest and most compatible fallback.
+    // It is easy to understand but not suitable for million-level concurrency:
+    // it scans fd_set every time and is limited by FD_SETSIZE on many systems.
     void check_select_fd(socket_t fd) const {
 #if !defined(_WIN32)
         if (fd >= FD_SETSIZE) {

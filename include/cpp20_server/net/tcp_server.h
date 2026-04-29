@@ -1,16 +1,11 @@
 #pragma once
 
-#include "cpp20_server/net/buffer.h"
-#include "cpp20_server/net/poller.h"
-#include "cpp20_server/net/socket.h"
-
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 
 namespace cpp20_server::net {
 
@@ -19,6 +14,7 @@ struct TcpServerOptions {
     std::uint16_t port{8080};
     int backlog{4096};
     std::size_t max_events{4096};
+    std::size_t worker_threads{0};
 };
 
 struct ServerStats {
@@ -47,27 +43,8 @@ public:
     [[nodiscard]] const char* backend_name() const noexcept;
 
 private:
-    struct Connection {
-        socket_t fd{invalid_socket};
-        Buffer output;
-        bool close_after_write{false};
-    };
-
-    void handle_accept();
-    void handle_read(socket_t fd);
-    void handle_write(socket_t fd);
-    void close_connection(socket_t fd) noexcept;
-    void enable_write(Connection& connection);
-    void disable_write(Connection& connection);
-
-    SocketRuntime runtime_;
-    TcpServerOptions options_;
-    Poller poller_;
-    socket_t listen_fd_{invalid_socket};
-    std::unordered_map<socket_t, Connection> connections_;
-    MessageCallback on_message_;
-    ServerStats stats_;
-    std::atomic_bool stopping_{false};
+    class Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace cpp20_server::net

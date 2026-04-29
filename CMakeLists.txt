@@ -13,14 +13,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(CPP20_SERVER_BUILD_EXAMPLES "Build example programs" ON)
 option(CPP20_SERVER_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
-set(CPP20_SERVER_BACKEND "auto" CACHE STRING "I/O backend: auto, epoll, kqueue, select")
-set_property(CACHE CPP20_SERVER_BACKEND PROPERTY STRINGS auto epoll kqueue select)
+set(CPP20_SERVER_BACKEND "auto" CACHE STRING "I/O backend: auto, epoll, kqueue, iocp, select")
+set_property(CACHE CPP20_SERVER_BACKEND PROPERTY STRINGS auto epoll kqueue iocp select)
 
 if(CPP20_SERVER_BACKEND STREQUAL "auto")
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         set(CPP20_SERVER_RESOLVED_BACKEND "epoll")
     elseif(APPLE)
         set(CPP20_SERVER_RESOLVED_BACKEND "kqueue")
+    elseif(WIN32)
+        set(CPP20_SERVER_RESOLVED_BACKEND "iocp")
     else()
         set(CPP20_SERVER_RESOLVED_BACKEND "select")
     endif()
@@ -36,12 +38,21 @@ if(CPP20_SERVER_RESOLVED_BACKEND STREQUAL "kqueue" AND NOT APPLE)
     message(FATAL_ERROR "kqueue backend is enabled here only for macOS")
 endif()
 
-add_library(cpp20_server
+if(CPP20_SERVER_RESOLVED_BACKEND STREQUAL "iocp" AND NOT WIN32)
+    message(FATAL_ERROR "iocp backend is only available on Windows")
+endif()
+
+set(CPP20_SERVER_SOURCES
     src/net/buffer.cpp
-    src/net/poller.cpp
     src/net/socket.cpp
     src/net/tcp_server.cpp
 )
+
+if(NOT CPP20_SERVER_RESOLVED_BACKEND STREQUAL "iocp")
+    list(APPEND CPP20_SERVER_SOURCES src/net/poller.cpp)
+endif()
+
+add_library(cpp20_server ${CPP20_SERVER_SOURCES})
 
 target_include_directories(cpp20_server
     PUBLIC
@@ -54,6 +65,8 @@ if(CPP20_SERVER_RESOLVED_BACKEND STREQUAL "epoll")
     target_compile_definitions(cpp20_server PRIVATE CPP20_SERVER_USE_EPOLL=1)
 elseif(CPP20_SERVER_RESOLVED_BACKEND STREQUAL "kqueue")
     target_compile_definitions(cpp20_server PRIVATE CPP20_SERVER_USE_KQUEUE=1)
+elseif(CPP20_SERVER_RESOLVED_BACKEND STREQUAL "iocp")
+    target_compile_definitions(cpp20_server PRIVATE CPP20_SERVER_USE_IOCP=1)
 elseif(CPP20_SERVER_RESOLVED_BACKEND STREQUAL "select")
     target_compile_definitions(cpp20_server PRIVATE CPP20_SERVER_USE_SELECT=1)
 else()

@@ -9,6 +9,13 @@
 
 namespace cpp20_server::net {
 
+// Event is the small cross-platform vocabulary used by this project.
+// Different OS APIs use different names:
+// - Linux epoll: EPOLLIN means "can read", EPOLLOUT means "can write".
+// - macOS kqueue: EVFILT_READ means "can read", EVFILT_WRITE means "can write".
+// - select: fd_set marks sockets that are ready.
+// We convert all of them into Event::read / Event::write / Event::error / Event::close
+// so the TcpServer does not need to know which OS it is running on.
 enum class Event : std::uint32_t {
     none = 0,
     read = 1U << 0U,
@@ -43,6 +50,11 @@ struct FiredEvent {
 
 class Poller {
 public:
+    // Poller is a thin wrapper around the OS event notification mechanism.
+    // Beginner explanation:
+    // - Without Poller: check every socket one by one, which is too slow.
+    // - With Poller: give all sockets to the OS, then ask "which sockets changed?"
+    // - epoll/kqueue/select are just different OS answers to that same question.
     explicit Poller(std::size_t max_events = 4096);
     ~Poller();
 

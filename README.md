@@ -19,10 +19,10 @@ https://github.com/zmy1213/server
 - 支持 Reactor 事件循环模型
 - Linux 自动使用 `epoll`
 - macOS 自动使用 `kqueue`
-- Windows 自动使用 `select`
+- Windows 自动使用 `IOCP`
 - 提供 Echo Server 示例
 
-说明：Windows 当前使用 `select` 是为了保证兼容和方便学习。如果后续要在 Windows 上实现真正的百万级连接，需要增加 `IOCP` 后端。
+说明：百万级连接不是只靠 C++ 代码就能保证，还需要系统参数、内存、端口、压测机数量一起配合。这个项目的目标是使用各系统上适合高并发的 IO 模型：Linux 用 `epoll`，macOS 用 `kqueue`，Windows 用 `IOCP`。
 
 ## 环境要求
 
@@ -66,9 +66,47 @@ https://github.com/zmy1213/server
 buffer      输出缓冲区
 socket      跨平台 socket 封装
 poller      epoll/kqueue/select 的统一事件接口
-tcp_server  TCP 服务器主逻辑
+tcp_server  TCP 服务器主逻辑，Windows IOCP 也在这里实现
 examples    示例程序
 ```
+
+## 小白先看：epoll / kqueue / IOCP 是什么
+
+写服务器时会同时连接很多客户端。如果不用这些机制，程序只能这样做：
+
+```text
+检查第 1 个连接有没有数据
+检查第 2 个连接有没有数据
+检查第 3 个连接有没有数据
+...
+检查第 1000000 个连接有没有数据
+```
+
+这会非常慢。
+
+所以现代服务器会把连接交给操作系统管理，然后问操作系统：
+
+```text
+现在到底哪些连接有事情要处理？
+```
+
+不同系统给出的高性能方案不一样：
+
+```text
+Linux    epoll   适合大量连接，是 Linux 高并发服务器常用方案
+macOS    kqueue  macOS/BSD 的高性能事件通知机制
+Windows  IOCP    Windows 上真正适合大量并发连接的完成端口模型
+select   兼容性好，但性能一般，不适合百万连接
+```
+
+简单理解：
+
+```text
+epoll/kqueue：操作系统告诉你“哪个 socket 可以读/写了”
+IOCP：操作系统告诉你“你之前提交的异步读/写已经完成了”
+```
+
+所以 Windows 的 `IOCP` 不是简单替换 `epoll` 函数名，它的代码结构本来就不同。
 
 ## 快速启动
 
@@ -118,6 +156,13 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
+使用 Visual Studio 生成器时也可以：
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+```
+
 启动服务器：
 
 ```powershell
@@ -137,7 +182,7 @@ cmake --build build --config Release
 ```text
 Linux    -> epoll
 macOS    -> kqueue
-Windows  -> select
+Windows  -> iocp
 ```
 
 也可以手动指定：
@@ -145,6 +190,7 @@ Windows  -> select
 ```bash
 cmake -S . -B build -DCPP20_SERVER_BACKEND=epoll
 cmake -S . -B build -DCPP20_SERVER_BACKEND=kqueue
+cmake -S . -B build -DCPP20_SERVER_BACKEND=iocp
 cmake -S . -B build -DCPP20_SERVER_BACKEND=select
 ```
 
@@ -153,8 +199,49 @@ cmake -S . -B build -DCPP20_SERVER_BACKEND=select
 ```text
 epoll  只能在 Linux 使用
 kqueue 当前只在 macOS 开启
+iocp   只能在 Windows 使用
 select 兼容性最好，但不适合百万连接
 ```
+
+## 百万级并发说明
+
+想支持百万连接，代码层面必须避免“一个连接一个线程”。本项目使用的方向是：
+
+```text
+Linux    epoll + 非阻塞 socket
+macOS    kqueue + 非阻塞 socket
+Windows  IOCP + 异步 WSARecv/WSASend
+```
+
+但是实际跑到百万连接还需要系统调优。
+
+Linux 常见参数：
+
+```bash
+ulimit -n 1048576
+sysctl -w net.core.somaxconn=65535
+sysctl -w net.ipv4.tcp_max_syn_backlog=65535
+sysctl -w net.ipv4.ip_local_port_range="10000 65000"
+```
+
+Windows 常见检查项：
+
+```text
+使用 64 位程序
+使用 IOCP，不使用 select
+增大可用内存
+准备多台压测客户端机器
+检查动态端口范围
+检查防火墙和杀毒软件是否限制连接
+```
+
+Windows 查看动态端口范围：
+
+```powershell
+netsh int ipv4 show dynamicport tcp
+```
+
+注意：单机自己连接自己通常测不到真实百万连接，因为客户端端口、内存和系统限制会先成为瓶颈。真正压测通常需要多台客户端机器。
 
 ## 示例：Echo Server
 
@@ -215,7 +302,7 @@ git remote set-url origin git@github.com:zmy1213/server.git
 5. 增加异步日志
 6. 增加压测脚本
 7. 增加 Linux 百万连接参数调优文档
-8. 增加 Windows IOCP 后端
+8. 增加 Windows AcceptEx 批量异步接收连接
 
 ## 当前阶段说明
 
