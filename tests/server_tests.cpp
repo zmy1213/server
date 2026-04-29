@@ -2,6 +2,7 @@
 #include "cpp20_server/base/logger.h"
 #include "cpp20_server/base/metrics.h"
 #include "cpp20_server/net/buffer.h"
+#include "cpp20_server/net/event_loop.h"
 #include "cpp20_server/net/socket.h"
 #include "cpp20_server/net/tcp_server.h"
 #include "cpp20_server/net/timer_queue.h"
@@ -437,6 +438,28 @@ void test_timer_queue() {
     expect(cancelled_count == 0, "cancelled repeat timer should not fire");
 }
 
+#if !defined(_WIN32)
+void test_event_loop_wakeup() {
+    using cpp20_server::net::EventLoop;
+
+    EventLoop loop{16};
+    std::atomic_bool task_ran{false};
+
+    std::thread thread{[&loop] {
+        loop.loop();
+    }};
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    loop.run_in_loop([&] {
+        task_ran.store(true);
+        loop.stop();
+    });
+
+    thread.join();
+    expect(task_ran.load(), "run_in_loop should wake EventLoop and execute task");
+}
+#endif
+
 void test_buffer() {
     // 单元测试：只验证 Buffer 自己的读写位置和内容，不启动服务器。
     Buffer buffer;
@@ -789,6 +812,9 @@ int main() {
     try {
         SocketRuntime runtime;
         run_test("timer_queue", test_timer_queue);
+#if !defined(_WIN32)
+        run_test("event_loop_wakeup", test_event_loop_wakeup);
+#endif
         run_test("buffer", test_buffer);
         run_test("config_parser", test_config_parser);
         run_test("async_logger", test_async_logger);

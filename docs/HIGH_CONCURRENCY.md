@@ -278,12 +278,30 @@ worker 线程创建 Connection
 一个连接固定属于一个 worker，避免多个线程同时读写同一个连接
 ```
 
-当前实现还有一个后续优化点：
+当前实现已经补上了跨线程唤醒机制：
 
 ```text
-EventLoop::run_in_loop() 现在用任务队列加短轮询等待
-后面可以加 eventfd/socketpair 唤醒机制
-这样跨线程投递任务时可以立即唤醒目标 worker
+其他线程调用 run_in_loop() / stop() / cancel_timer()
+        ↓
+EventLoop::wakeup() 往内部 wakeup socket 写 1 个字节
+        ↓
+poller.wait() 因为 wakeup socket 可读而立即返回
+        ↓
+EventLoop::drain_wakeup() 读掉这个字节
+        ↓
+EventLoop::process_pending_tasks() 执行任务，或者 stop() 退出循环
+```
+
+对应代码：
+
+| 功能 | 代码位置 | 说明 |
+| --- | --- | --- |
+| 创建唤醒 socket | [`src/net/event_loop.cpp`](../src/net/event_loop.cpp) | POSIX 使用 `socketpair()`，Windows 辅助实现使用本机回环 TCP socket pair |
+| 注册唤醒读事件 | [`src/net/event_loop.cpp`](../src/net/event_loop.cpp) | `EventLoop` 构造函数把 wakeup 读端包装成 `Channel` 并注册读事件 |
+| 投递任务后唤醒 | [`src/net/event_loop.cpp`](../src/net/event_loop.cpp) | `run_in_loop()` 先把任务放进队列，再调用 `wakeup()` |
+| 停止循环后唤醒 | [`src/net/event_loop.cpp`](../src/net/event_loop.cpp) | `stop()` 设置停止标记后调用 `wakeup()`，避免线程还睡在 `poller.wait()` |
+| 定时器变更后唤醒 | [`src/net/event_loop.cpp`](../src/net/event_loop.cpp) | `run_after()` / `run_every()` / `cancel_timer()` 修改定时器后唤醒事件循环 |
+| 清空唤醒字节 | [`src/net/event_loop.cpp`](../src/net/event_loop.cpp) | `drain_wakeup()` 把 wakeup socket 里积累的字节读干净 |
 ```
 
 ## 第一步：socket 设置成非阻塞
@@ -637,7 +655,7 @@ TcpServer::Impl::start()
 | 示例程序调用服务器启动 | [`examples/echo_server.cpp:39-48`](../examples/echo_server.cpp#L39-L48) | 创建 `TcpServer`，设置 echo 回调，然后调用 `server.start()` |
 | 对外 `TcpServer::start()` | [`src/net/tcp_server.cpp:493-495`](../src/net/tcp_server.cpp#L493-L495) | 公共入口，内部转发给平台相关的 `Impl::start()` |
 | Linux/macOS 启动 Reactor | [`src/net/tcp_server.cpp:406-415`](../src/net/tcp_server.cpp#L406-L415) | 创建 `Acceptor`，设置新连接回调，然后进入 `EventLoop::loop()` |
-| Linux/macOS 事件循环 | [`src/net/event_loop.cpp:13-23`](../src/net/event_loop.cpp#L13-L23) | `EventLoop` 循环等待事件，并把事件分发给对应 `Channel` |
+| Linux/macOS 事件循环 | [`src/net/event_loop.cpp`](../src/net/event_loop.cpp) | `EventLoop::loop()` 循环等待事件，并把事件分发给对应 `Channel` |
 | Channel 回调分发 | [`src/net/channel.cpp:77-96`](../src/net/channel.cpp#L77-L96) | `Channel` 根据 read/write/close/error 调用对应回调 |
 | Windows IOCP 启动流程 | [`src/net/tcp_server.cpp:63-81`](../src/net/tcp_server.cpp#L63-L81) | 创建监听 socket，创建 IOCP，启动 worker 线程和 accept 线程 |
 | Linux/macOS 等待事件 | [`src/net/poller.cpp:165-224`](../src/net/poller.cpp#L165-L224) | `Poller::wait()` 内部调用 `epoll_wait()` 或 `kevent()` |
@@ -718,7 +736,7 @@ Linux/macOS 流程代码定位：
 | 创建 `Acceptor` | [`src/net/tcp_server.cpp:406-410`](../src/net/tcp_server.cpp#L406-L410) | `TcpServer` 创建 `Acceptor`，并设置新连接回调 |
 | 创建监听 socket | [`src/net/acceptor.cpp:16-21`](../src/net/acceptor.cpp#L16-L21) | `Acceptor` 调用 `create_listening_socket()`，并把监听 fd 包装成 `Channel` |
 | `socket/bind/listen` | [`src/net/socket.cpp:154-197`](../src/net/socket.cpp#L154-L197) | 创建 socket，绑定地址端口，开始监听，并设置非阻塞 |
-| 事件循环等待事件 | [`src/net/event_loop.cpp:13-23`](../src/net/event_loop.cpp#L13-L23) | `EventLoop` 调用 `poller_.wait()` 等待操作系统返回活跃 socket |
+| 事件循环等待事件 | [`src/net/event_loop.cpp`](../src/net/event_loop.cpp) | `EventLoop::loop()` 调用 `poller_.wait()` 等待操作系统返回活跃 socket |
 | epoll 创建和等待 | [`src/net/poller.cpp:77-91`](../src/net/poller.cpp#L77-L91), [`src/net/poller.cpp:165-182`](../src/net/poller.cpp#L165-L182) | Linux 下创建 `epoll_fd_`，用 `epoll_wait()` 返回活跃连接 |
 | kqueue 创建和等待 | [`src/net/poller.cpp:81-95`](../src/net/poller.cpp#L81-L95), [`src/net/poller.cpp:183-220`](../src/net/poller.cpp#L183-L220) | macOS 下创建 `kqueue_fd_`，用 `kevent()` 返回活跃连接 |
 | 监听 socket 可读 | [`src/net/acceptor.cpp:20-21`](../src/net/acceptor.cpp#L20-L21), [`src/net/channel.cpp:77-83`](../src/net/channel.cpp#L77-L83) | 监听 fd 的 `Channel` 收到可读事件后调用 `Acceptor::handle_read()` |
@@ -1212,6 +1230,7 @@ tests/server_tests.cpp
 
 ```text
 TimerQueue 单次和重复定时任务
+EventLoop 跨线程唤醒
 验证 Buffer 基础读写是否正确
 验证 Config 配置解析
 验证 AsyncLogger 异步写日志
@@ -1281,15 +1300,16 @@ Channel::handle_event()
 
 ## 当前版本还有哪些不足
 
-当前版本是第一阶段高并发骨架，不是最终工业级服务器。
+当前版本是教学型高并发骨架，不是最终工业级服务器。
 
 还需要继续补：
 
 ```text
 Windows AcceptEx 异步 accept
-异步日志
-HTTP 协议解析
-压测工具
+C++ HTTP Client
+异步 connect
+std::stop_token 风格的可取消任务接口
+更细粒度的定时器取消和连接取消语义
 百万连接调优脚本
 更完善的错误处理
 ```
@@ -1300,13 +1320,14 @@ Linux/macOS 当前已经有多线程 Reactor 第一版：
 主线程负责 accept
 多个 worker EventLoop 负责连接读写
 每个连接固定绑定一个 worker
+跨线程投递任务可以通过 wakeup socket 立即唤醒目标 worker
 ```
 
 后续还需要继续补：
 
 ```text
-EventLoop 跨线程唤醒机制
 更完整的多线程压测
+Linux 百万连接参数调优文档和脚本
 ```
 
 ## 一句话总结

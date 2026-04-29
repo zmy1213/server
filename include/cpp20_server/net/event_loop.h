@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -42,9 +43,14 @@ public:
     [[nodiscard]] const char* backend_name() const noexcept;
 
 private:
+    void wakeup() noexcept;
+    void drain_wakeup() noexcept;
     void process_pending_tasks();
 
     Poller poller_;
+    socket_t wakeup_read_fd_{invalid_socket};
+    socket_t wakeup_write_fd_{invalid_socket};
+    std::unique_ptr<Channel> wakeup_channel_;
     TimerQueue timer_queue_;
     std::unordered_map<socket_t, Channel*> channels_;
     std::mutex pending_mutex_;

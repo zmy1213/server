@@ -1009,6 +1009,7 @@ AsyncLogger 异步日志第一版
 Metrics 指标输出第一版
 HTTP 压测脚本第一版
 TimerQueue 可取消定时器第一版
+EventLoop 跨线程唤醒第一版
 HttpRouter 路由表第一版
 EventLoop / Channel / Acceptor / Connection 拆分
 多线程 Reactor 第一版

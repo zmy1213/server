@@ -120,7 +120,7 @@ logger       后台线程异步写日志
 metrics      把 ServerStats 转成文本或 Prometheus 格式
 channel      一个 fd 关心的事件和回调
 connection   单个客户端连接的读写状态
-event_loop   Reactor 事件循环
+event_loop   Reactor 事件循环，支持跨线程唤醒
 poller       epoll/kqueue/select 的统一事件接口
 socket       跨平台 socket 封装
 timer_queue  小根堆定时器
@@ -240,6 +240,55 @@ warnings-as-errors 严格构建通过
 ```
 
 第 4 阶段已经完成第一版拆分；下一轮已经继续进入第 5 阶段：多线程 Reactor。
+
+## 最新代码说明：EventLoop 唤醒机制
+
+这一轮给 `EventLoop` 增加了自唤醒能力。
+
+为什么需要它：
+
+```text
+EventLoop 正在 poller.wait()
+        ↓
+另一个线程调用 run_in_loop() 投递任务
+        ↓
+如果没有唤醒机制，EventLoop 可能要等 poller 超时后才执行任务
+        ↓
+stop() 退出也可能不够及时
+```
+
+现在的做法：
+
+```text
+EventLoop 内部创建一对 wakeup socket
+        ↓
+读端注册进 epoll/kqueue/select
+        ↓
+其他线程调用 run_in_loop() / stop() / cancel_timer()
+        ↓
+往写端写 1 个字节
+        ↓
+poller.wait() 立刻返回
+        ↓
+EventLoop drain_wakeup() 清空唤醒字节
+        ↓
+执行 pending task 或退出循环
+```
+
+小白理解：
+
+```text
+以前：EventLoop 像睡觉的人，最多 50ms 自己醒一次看有没有任务
+现在：别人有任务时可以按门铃，EventLoop 立刻醒
+```
+
+核心代码：
+
+```text
+include/cpp20_server/net/event_loop.h
+src/net/event_loop.cpp
+tests/server_tests.cpp
+```
 
 ## 最新代码说明：多线程 Reactor
 
@@ -820,6 +869,7 @@ ctest --test-dir build --output-on-failure
 
 ```text
 TimerQueue 单次定时任务和重复定时任务
+EventLoop 跨线程唤醒
 Buffer 基础读写
 Config 配置解析
 AsyncLogger 异步写日志

@@ -13,16 +13,20 @@ TimerQueue::TimerId TimerQueue::run_after(std::chrono::milliseconds delay, Callb
         delay = std::chrono::milliseconds{0};
     }
 
-    const TimerId id = next_timer_id_++;
-    active_.insert(id);
-    push_timer(Timer{
-        Clock::now() + delay,
-        std::chrono::milliseconds{0},
-        next_sequence_++,
-        id,
-        std::move(callback),
-        false,
-    });
+    TimerId id = 0;
+    {
+        std::scoped_lock lock(mutex_);
+        id = next_timer_id_++;
+        active_.insert(id);
+        push_timer(Timer{
+            Clock::now() + delay,
+            std::chrono::milliseconds{0},
+            next_sequence_++,
+            id,
+            std::move(callback),
+            false,
+        });
+    }
     return id;
 }
 
@@ -35,16 +39,20 @@ TimerQueue::TimerId TimerQueue::run_every(std::chrono::milliseconds interval, Ca
         interval = std::chrono::milliseconds{1};
     }
 
-    const TimerId id = next_timer_id_++;
-    active_.insert(id);
-    push_timer(Timer{
-        Clock::now() + interval,
-        interval,
-        next_sequence_++,
-        id,
-        std::move(callback),
-        true,
-    });
+    TimerId id = 0;
+    {
+        std::scoped_lock lock(mutex_);
+        id = next_timer_id_++;
+        active_.insert(id);
+        push_timer(Timer{
+            Clock::now() + interval,
+            interval,
+            next_sequence_++,
+            id,
+            std::move(callback),
+            true,
+        });
+    }
     return id;
 }
 
@@ -52,12 +60,14 @@ void TimerQueue::cancel(TimerId id) {
     if (id == 0) {
         return;
     }
+    std::scoped_lock lock(mutex_);
     if (active_.find(id) != active_.end()) {
         cancelled_.insert(id);
     }
 }
 
 std::chrono::milliseconds TimerQueue::next_timeout(std::chrono::milliseconds fallback) const {
+    std::scoped_lock lock(mutex_);
     if (timers_.empty()) {
         return fallback;
     }
@@ -76,27 +86,38 @@ void TimerQueue::run_due_timers() {
     const auto now = Clock::now();
     std::vector<Timer> due;
 
-    while (!timers_.empty() && timers_.front().expires_at <= now) {
-        std::pop_heap(timers_.begin(), timers_.end(), later);
-        due.push_back(std::move(timers_.back()));
-        timers_.pop_back();
+    {
+        std::scoped_lock lock(mutex_);
+        while (!timers_.empty() && timers_.front().expires_at <= now) {
+            std::pop_heap(timers_.begin(), timers_.end(), later);
+            due.push_back(std::move(timers_.back()));
+            timers_.pop_back();
+        }
     }
 
     for (auto& timer : due) {
-        if (cancelled_.erase(timer.id) > 0) {
-            active_.erase(timer.id);
-            continue;
+        {
+            std::scoped_lock lock(mutex_);
+            if (cancelled_.erase(timer.id) > 0) {
+                active_.erase(timer.id);
+                continue;
+            }
         }
+
         if (timer.callback) {
             timer.callback();
         }
-        if (timer.repeat && cancelled_.find(timer.id) == cancelled_.end()) {
-            timer.expires_at = Clock::now() + timer.interval;
-            timer.sequence = next_sequence_++;
-            push_timer(std::move(timer));
-        } else {
-            cancelled_.erase(timer.id);
-            active_.erase(timer.id);
+
+        {
+            std::scoped_lock lock(mutex_);
+            if (timer.repeat && cancelled_.find(timer.id) == cancelled_.end()) {
+                timer.expires_at = Clock::now() + timer.interval;
+                timer.sequence = next_sequence_++;
+                push_timer(std::move(timer));
+            } else {
+                cancelled_.erase(timer.id);
+                active_.erase(timer.id);
+            }
         }
     }
 }

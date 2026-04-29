@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <unordered_set>
 #include <vector>
 
@@ -39,6 +40,7 @@ private:
     static bool later(const Timer& lhs, const Timer& rhs) noexcept;
     void push_timer(Timer timer);
 
+    mutable std::mutex mutex_;
     std::vector<Timer> timers_;
     std::uint64_t next_sequence_{0};
     TimerId next_timer_id_{1};
