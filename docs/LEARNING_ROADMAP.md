@@ -728,6 +728,7 @@ macOS kqueue 后端
 Linux epoll 后端代码
 Windows IOCP 主干代码
 Echo Server
+EventLoop / Channel / Acceptor / Connection 拆分
 高并发原理文档
 流程到代码定位文档
 ```
@@ -735,22 +736,21 @@ Echo Server
 下一步最合理的是：
 
 ```text
-第 4 阶段：继续拆 Reactor 模型
+第 5 阶段：多线程 Reactor
 ```
 
-也就是新增：
+也就是把现在的单线程 Reactor 升级成：
 
 ```text
-EventLoop
-Channel
-Acceptor
-Connection
+main thread 负责 accept
+worker EventLoop 负责连接读写
+新连接按轮询分发给 worker
+一个连接只属于一个 worker
 ```
 
-拆完之后，再进入：
+多线程 Reactor 之后，再进入：
 
 ```text
-多线程 Reactor
 定时器
 HTTP
 压测

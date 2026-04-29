@@ -120,8 +120,15 @@ Windows  IOCP + 异步 WSARecv / WSASend
 ```text
 include/cpp20_server/net/socket.h       socket 跨平台封装
 include/cpp20_server/net/poller.h       epoll/kqueue/select 的统一事件接口
+include/cpp20_server/net/event_loop.h   Reactor 事件循环
+include/cpp20_server/net/channel.h      fd 事件和回调封装
+include/cpp20_server/net/acceptor.h     新连接接收器
+include/cpp20_server/net/connection.h   单个客户端连接状态
 src/net/poller.cpp                      epoll/kqueue/select 的具体实现
 src/net/tcp_server.cpp                  TCP 服务器主逻辑，Windows IOCP 也在这里
+src/net/event_loop.cpp                  Reactor 事件分发
+src/net/acceptor.cpp                    accept 新连接
+src/net/connection.cpp                  recv/send 读写逻辑
 include/cpp20_server/net/buffer.h       输出缓冲区
 src/net/buffer.cpp                      缓冲区实现
 ```
@@ -475,11 +482,13 @@ TcpServer::Impl::start()
 | 流程步骤 | 代码位置 | 说明 |
 | --- | --- | --- |
 | 示例程序调用服务器启动 | [`examples/echo_server.cpp:39-48`](../examples/echo_server.cpp#L39-L48) | 创建 `TcpServer`，设置 echo 回调，然后调用 `server.start()` |
-| 对外 `TcpServer::start()` | [`src/net/tcp_server.cpp:654-656`](../src/net/tcp_server.cpp#L654-L656) | 公共入口，内部转发给平台相关的 `Impl::start()` |
-| Linux/macOS 事件循环 | [`src/net/tcp_server.cpp:428-463`](../src/net/tcp_server.cpp#L428-L463) | 创建监听 socket，注册到 `Poller`，循环等待事件并分发到 accept/read/write |
-| Windows IOCP 启动流程 | [`src/net/tcp_server.cpp:82-100`](../src/net/tcp_server.cpp#L82-L100) | 创建监听 socket，创建 IOCP，启动 worker 线程和 accept 线程 |
+| 对外 `TcpServer::start()` | [`src/net/tcp_server.cpp:493-495`](../src/net/tcp_server.cpp#L493-L495) | 公共入口，内部转发给平台相关的 `Impl::start()` |
+| Linux/macOS 启动 Reactor | [`src/net/tcp_server.cpp:406-415`](../src/net/tcp_server.cpp#L406-L415) | 创建 `Acceptor`，设置新连接回调，然后进入 `EventLoop::loop()` |
+| Linux/macOS 事件循环 | [`src/net/event_loop.cpp:13-23`](../src/net/event_loop.cpp#L13-L23) | `EventLoop` 循环等待事件，并把事件分发给对应 `Channel` |
+| Channel 回调分发 | [`src/net/channel.cpp:77-96`](../src/net/channel.cpp#L77-L96) | `Channel` 根据 read/write/close/error 调用对应回调 |
+| Windows IOCP 启动流程 | [`src/net/tcp_server.cpp:63-81`](../src/net/tcp_server.cpp#L63-L81) | 创建监听 socket，创建 IOCP，启动 worker 线程和 accept 线程 |
 | Linux/macOS 等待事件 | [`src/net/poller.cpp:165-224`](../src/net/poller.cpp#L165-L224) | `Poller::wait()` 内部调用 `epoll_wait()` 或 `kevent()` |
-| Windows 等待完成事件 | [`src/net/tcp_server.cpp:293-340`](../src/net/tcp_server.cpp#L293-L340) | worker 线程调用 `GetQueuedCompletionStatus()` 等待异步 IO 完成 |
+| Windows 等待完成事件 | [`src/net/tcp_server.cpp:274-320`](../src/net/tcp_server.cpp#L274-L320) | worker 线程调用 `GetQueuedCompletionStatus()` 等待异步 IO 完成 |
 
 ## 为什么需要 Buffer
 
@@ -524,7 +533,7 @@ Linux/macOS 流程：
         ↓
 listen_fd 触发可读事件
         ↓
-handle_accept()
+Acceptor::handle_read()
         ↓
 accept() 得到 client socket
         ↓
@@ -536,7 +545,7 @@ accept() 得到 client socket
         ↓
 Poller 返回可读事件
         ↓
-handle_read()
+Connection::handle_read()
         ↓
 调用业务回调生成响应
         ↓
@@ -544,7 +553,7 @@ handle_read()
         ↓
 注册可写事件
         ↓
-handle_write()
+Connection::handle_write()
         ↓
 send() 返回客户端
 ```
@@ -553,21 +562,23 @@ Linux/macOS 流程代码定位：
 
 | 流程步骤 | 代码位置 | 说明 |
 | --- | --- | --- |
-| 创建监听 socket | [`src/net/tcp_server.cpp:428-430`](../src/net/tcp_server.cpp#L428-L430) | `create_listening_socket()` 创建 `listen_fd_`，然后把监听 socket 注册成可读事件 |
+| 创建 `Acceptor` | [`src/net/tcp_server.cpp:406-410`](../src/net/tcp_server.cpp#L406-L410) | `TcpServer` 创建 `Acceptor`，并设置新连接回调 |
+| 创建监听 socket | [`src/net/acceptor.cpp:16-21`](../src/net/acceptor.cpp#L16-L21) | `Acceptor` 调用 `create_listening_socket()`，并把监听 fd 包装成 `Channel` |
 | `socket/bind/listen` | [`src/net/socket.cpp:154-197`](../src/net/socket.cpp#L154-L197) | 创建 socket，绑定地址端口，开始监听，并设置非阻塞 |
-| 事件循环等待事件 | [`src/net/tcp_server.cpp:435-437`](../src/net/tcp_server.cpp#L435-L437) | `poller_.wait()` 等待操作系统返回活跃 socket |
+| 事件循环等待事件 | [`src/net/event_loop.cpp:13-23`](../src/net/event_loop.cpp#L13-L23) | `EventLoop` 调用 `poller_.wait()` 等待操作系统返回活跃 socket |
 | epoll 创建和等待 | [`src/net/poller.cpp:77-91`](../src/net/poller.cpp#L77-L91), [`src/net/poller.cpp:165-182`](../src/net/poller.cpp#L165-L182) | Linux 下创建 `epoll_fd_`，用 `epoll_wait()` 返回活跃连接 |
 | kqueue 创建和等待 | [`src/net/poller.cpp:81-95`](../src/net/poller.cpp#L81-L95), [`src/net/poller.cpp:183-220`](../src/net/poller.cpp#L183-L220) | macOS 下创建 `kqueue_fd_`，用 `kevent()` 返回活跃连接 |
-| 监听 socket 可读 | [`src/net/tcp_server.cpp:438-440`](../src/net/tcp_server.cpp#L438-L440) | 如果事件来自 `listen_fd_`，说明有新客户端连接，调用 `handle_accept()` |
-| `accept()` 新连接 | [`src/net/tcp_server.cpp:488-518`](../src/net/tcp_server.cpp#L488-L518) | 循环 `accept()`，得到 `client socket` |
-| 新连接设置非阻塞 | [`src/net/tcp_server.cpp:507-510`](../src/net/tcp_server.cpp#L507-L510), [`src/net/socket.cpp:72-90`](../src/net/socket.cpp#L72-L90) | 设置非阻塞和 `TCP_NODELAY`，再把新连接注册到 `Poller` |
-| 普通连接可读 | [`src/net/tcp_server.cpp:443-445`](../src/net/tcp_server.cpp#L443-L445) | 如果事件是 `Event::read`，调用 `handle_read()` |
-| 读取客户端数据 | [`src/net/tcp_server.cpp:521-564`](../src/net/tcp_server.cpp#L521-L564) | `recv()` 读取数据，调用 `on_message_` 业务回调，响应数据写入 `Buffer` |
-| 注册可写事件 | [`src/net/tcp_server.cpp:561-563`](../src/net/tcp_server.cpp#L561-L563), [`src/net/tcp_server.cpp:625-627`](../src/net/tcp_server.cpp#L625-L627) | 如果输出缓冲区有数据，就让 `Poller` 同时关注读事件和写事件 |
-| 普通连接可写 | [`src/net/tcp_server.cpp:447-449`](../src/net/tcp_server.cpp#L447-L449) | 如果事件是 `Event::write`，调用 `handle_write()` |
-| 发送响应数据 | [`src/net/tcp_server.cpp:566-608`](../src/net/tcp_server.cpp#L566-L608) | `send()` 尽量发送 `Buffer` 里的数据，没发完就等下次可写 |
-| 发送完成后取消写事件 | [`src/net/tcp_server.cpp:597-607`](../src/net/tcp_server.cpp#L597-L607), [`src/net/tcp_server.cpp:629-631`](../src/net/tcp_server.cpp#L629-L631) | 如果 `Buffer` 清空，就不再关注写事件，只保留读事件 |
-| 连接关闭或错误 | [`src/net/tcp_server.cpp:451-460`](../src/net/tcp_server.cpp#L451-L460), [`src/net/tcp_server.cpp:610-623`](../src/net/tcp_server.cpp#L610-L623) | 出错或关闭时，从 `Poller` 移除 fd，关闭 socket，删除连接对象 |
+| 监听 socket 可读 | [`src/net/acceptor.cpp:20-21`](../src/net/acceptor.cpp#L20-L21), [`src/net/channel.cpp:77-83`](../src/net/channel.cpp#L77-L83) | 监听 fd 的 `Channel` 收到可读事件后调用 `Acceptor::handle_read()` |
+| `accept()` 新连接 | [`src/net/acceptor.cpp:40-72`](../src/net/acceptor.cpp#L40-L72) | 循环 `accept()`，得到 `client socket` |
+| 新连接设置非阻塞 | [`src/net/acceptor.cpp:59-63`](../src/net/acceptor.cpp#L59-L63), [`src/net/socket.cpp:72-90`](../src/net/socket.cpp#L72-L90) | 设置非阻塞和 `TCP_NODELAY`，然后回调给 `TcpServer` |
+| 创建 `Connection` | [`src/net/tcp_server.cpp:435-452`](../src/net/tcp_server.cpp#L435-L452), [`src/net/connection.cpp:34-43`](../src/net/connection.cpp#L34-L43) | `TcpServer` 创建连接对象，`Connection` 绑定 read/write/close/error 回调 |
+| 注册连接读事件 | [`src/net/connection.cpp:65-67`](../src/net/connection.cpp#L65-L67), [`src/net/channel.cpp:39-43`](../src/net/channel.cpp#L39-L43) | `Connection::start()` 让 `Channel` 关注读事件 |
+| 普通连接可读 | [`src/net/channel.cpp:77-83`](../src/net/channel.cpp#L77-L83), [`src/net/connection.cpp:86-122`](../src/net/connection.cpp#L86-L122) | `Channel` 调用 `Connection::handle_read()`，`recv()` 读取客户端数据 |
+| 生成响应并写入 Buffer | [`src/net/connection.cpp:90-99`](../src/net/connection.cpp#L90-L99) | 调用 `on_message_` 业务回调，响应数据写入输出缓冲区 |
+| 注册可写事件 | [`src/net/connection.cpp:119-120`](../src/net/connection.cpp#L119-L120), [`src/net/channel.cpp:45-49`](../src/net/channel.cpp#L45-L49) | 如果输出缓冲区有数据，就让 `Channel` 同时关注写事件 |
+| 普通连接可写 | [`src/net/channel.cpp:84-87`](../src/net/channel.cpp#L84-L87), [`src/net/connection.cpp:124-159`](../src/net/connection.cpp#L124-L159) | `Channel` 调用 `Connection::handle_write()`，`send()` 发送 Buffer 数据 |
+| 发送完成后取消写事件 | [`src/net/connection.cpp:148-158`](../src/net/connection.cpp#L148-L158), [`src/net/channel.cpp:51-55`](../src/net/channel.cpp#L51-L55) | 如果 Buffer 清空，就不再关注写事件，只保留读事件 |
+| 连接关闭或错误 | [`src/net/connection.cpp:161-177`](../src/net/connection.cpp#L161-L177), [`src/net/tcp_server.cpp:455-463`](../src/net/tcp_server.cpp#L455-L463) | 连接关闭时回调 `TcpServer` 删除连接对象 |
 
 Windows IOCP 流程：
 
@@ -594,27 +605,27 @@ Windows IOCP 流程代码定位：
 | 流程步骤 | 代码位置 | 说明 |
 | --- | --- | --- |
 | 示例程序调用服务器启动 | [`examples/echo_server.cpp:39-48`](../examples/echo_server.cpp#L39-L48) | Windows 和 Linux/macOS 一样，入口都是创建 `TcpServer` 后调用 `server.start()` |
-| 对外 `TcpServer::start()` | [`src/net/tcp_server.cpp:654-656`](../src/net/tcp_server.cpp#L654-L656) | 公共入口，内部转发到 Windows IOCP 版本的 `Impl::start()` |
-| 创建监听 socket | [`src/net/tcp_server.cpp:82-83`](../src/net/tcp_server.cpp#L82-L83), [`src/net/socket.cpp:154-197`](../src/net/socket.cpp#L154-L197) | 创建服务端监听 socket，内部完成 `socket/bind/listen` |
-| 创建 IOCP 完成端口 | [`src/net/tcp_server.cpp:84-87`](../src/net/tcp_server.cpp#L84-L87) | `CreateIoCompletionPort(INVALID_HANDLE_VALUE, ...)` 创建一个 IOCP 队列 |
-| 启动 worker 线程 | [`src/net/tcp_server.cpp:89`](../src/net/tcp_server.cpp#L89), [`src/net/tcp_server.cpp:154-162`](../src/net/tcp_server.cpp#L154-L162) | 根据 CPU 核数或配置启动多个 worker，worker 后面负责处理 IO 完成事件 |
-| 启动 accept 线程 | [`src/net/tcp_server.cpp:90`](../src/net/tcp_server.cpp#L90) | 单独线程执行 `accept_loop()`，负责接收新连接 |
-| 等待客户端连接 | [`src/net/tcp_server.cpp:176-207`](../src/net/tcp_server.cpp#L176-L207) | `accept_loop()` 循环调用 `accept()` 获取新的 client socket |
-| `accept()` 得到 client socket | [`src/net/tcp_server.cpp:180-182`](../src/net/tcp_server.cpp#L180-L182) | 新客户端连接进来后，`accept()` 返回这个客户端对应的 socket |
-| 新连接进入注册流程 | [`src/net/tcp_server.cpp:199-201`](../src/net/tcp_server.cpp#L199-L201) | 设置 `TCP_NODELAY` 后调用 `register_connection(client)` |
-| 创建连接对象 | [`src/net/tcp_server.cpp:209-212`](../src/net/tcp_server.cpp#L209-L212) | 为这个客户端创建 `Connection`，保存 fd、读上下文、写上下文和关闭状态 |
-| 绑定 client socket 到 IOCP | [`src/net/tcp_server.cpp:214-220`](../src/net/tcp_server.cpp#L214-L220) | `CreateIoCompletionPort(socket, iocp_, key, 0)` 把 socket 关联到 IOCP |
-| 保存连接并更新统计 | [`src/net/tcp_server.cpp:222-227`](../src/net/tcp_server.cpp#L222-L227) | 把连接放进 `connections_`，增加 accepted/active 计数 |
-| 提交第一次异步读 | [`src/net/tcp_server.cpp:229`](../src/net/tcp_server.cpp#L229), [`src/net/tcp_server.cpp:232-260`](../src/net/tcp_server.cpp#L232-L260) | `post_recv()` 准备 `OVERLAPPED/WSABUF`，调用 `WSARecv()` 提交异步读 |
-| worker 等待 IO 完成 | [`src/net/tcp_server.cpp:293-302`](../src/net/tcp_server.cpp#L293-L302) | worker 调用 `GetQueuedCompletionStatus()`，阻塞等待读或写完成 |
-| 根据 completion key 找回连接 | [`src/net/tcp_server.cpp:307-311`](../src/net/tcp_server.cpp#L307-L311) | IOCP 返回之前绑定的 `Connection*`，再通过 `OVERLAPPED*` 找到本次操作上下文 |
-| 读完成后处理数据 | [`src/net/tcp_server.cpp:320-329`](../src/net/tcp_server.cpp#L320-L329) | 如果是 `recv` 完成，统计读取字节，调用 `on_message_` 生成响应 |
-| 提交异步写 | [`src/net/tcp_server.cpp:328`](../src/net/tcp_server.cpp#L328), [`src/net/tcp_server.cpp:262-291`](../src/net/tcp_server.cpp#L262-L291) | `post_send()` 把响应放入发送上下文，调用 `WSASend()` 提交异步写 |
-| 写完成后继续读 | [`src/net/tcp_server.cpp:332-339`](../src/net/tcp_server.cpp#L332-L339) | 如果是 `send` 完成，统计写入字节，然后再次 `post_recv()` 等下一条消息 |
-| 客户端关闭或 IO 错误 | [`src/net/tcp_server.cpp:313-317`](../src/net/tcp_server.cpp#L313-L317) | `GetQueuedCompletionStatus()` 失败或传输字节为 0 时，进入关闭流程 |
-| 关闭连接 | [`src/net/tcp_server.cpp:351-361`](../src/net/tcp_server.cpp#L351-L361) | 标记连接关闭并关闭 socket |
-| 没有未完成 IO 后释放连接 | [`src/net/tcp_server.cpp:343-349`](../src/net/tcp_server.cpp#L343-L349), [`src/net/tcp_server.cpp:363-377`](../src/net/tcp_server.cpp#L363-L377) | `pending_operations` 归零后，从 `connections_` 删除连接对象 |
-| 停止服务器唤醒 worker | [`src/net/tcp_server.cpp:103-117`](../src/net/tcp_server.cpp#L103-L117) | `stop()` 关闭监听 socket，并用 `PostQueuedCompletionStatus()` 唤醒 worker 退出 |
+| 对外 `TcpServer::start()` | [`src/net/tcp_server.cpp:493-495`](../src/net/tcp_server.cpp#L493-L495) | 公共入口，内部转发到 Windows IOCP 版本的 `Impl::start()` |
+| 创建监听 socket | [`src/net/tcp_server.cpp:63-64`](../src/net/tcp_server.cpp#L63-L64), [`src/net/socket.cpp:154-197`](../src/net/socket.cpp#L154-L197) | 创建服务端监听 socket，内部完成 `socket/bind/listen` |
+| 创建 IOCP 完成端口 | [`src/net/tcp_server.cpp:65-68`](../src/net/tcp_server.cpp#L65-L68) | `CreateIoCompletionPort(INVALID_HANDLE_VALUE, ...)` 创建一个 IOCP 队列 |
+| 启动 worker 线程 | [`src/net/tcp_server.cpp:70`](../src/net/tcp_server.cpp#L70), [`src/net/tcp_server.cpp:135-143`](../src/net/tcp_server.cpp#L135-L143) | 根据 CPU 核数或配置启动多个 worker，worker 后面负责处理 IO 完成事件 |
+| 启动 accept 线程 | [`src/net/tcp_server.cpp:71`](../src/net/tcp_server.cpp#L71) | 单独线程执行 `accept_loop()`，负责接收新连接 |
+| 等待客户端连接 | [`src/net/tcp_server.cpp:157-188`](../src/net/tcp_server.cpp#L157-L188) | `accept_loop()` 循环调用 `accept()` 获取新的 client socket |
+| `accept()` 得到 client socket | [`src/net/tcp_server.cpp:161-163`](../src/net/tcp_server.cpp#L161-L163) | 新客户端连接进来后，`accept()` 返回这个客户端对应的 socket |
+| 新连接进入注册流程 | [`src/net/tcp_server.cpp:180-182`](../src/net/tcp_server.cpp#L180-L182) | 设置 `TCP_NODELAY` 后调用 `register_connection(client)` |
+| 创建连接对象 | [`src/net/tcp_server.cpp:190-193`](../src/net/tcp_server.cpp#L190-L193) | 为这个客户端创建 `Connection`，保存 fd、读上下文、写上下文和关闭状态 |
+| 绑定 client socket 到 IOCP | [`src/net/tcp_server.cpp:195-201`](../src/net/tcp_server.cpp#L195-L201) | `CreateIoCompletionPort(socket, iocp_, key, 0)` 把 socket 关联到 IOCP |
+| 保存连接并更新统计 | [`src/net/tcp_server.cpp:203-208`](../src/net/tcp_server.cpp#L203-L208) | 把连接放进 `connections_`，增加 accepted/active 计数 |
+| 提交第一次异步读 | [`src/net/tcp_server.cpp:210`](../src/net/tcp_server.cpp#L210), [`src/net/tcp_server.cpp:213-241`](../src/net/tcp_server.cpp#L213-L241) | `post_recv()` 准备 `OVERLAPPED/WSABUF`，调用 `WSARecv()` 提交异步读 |
+| worker 等待 IO 完成 | [`src/net/tcp_server.cpp:274-283`](../src/net/tcp_server.cpp#L274-L283) | worker 调用 `GetQueuedCompletionStatus()`，阻塞等待读或写完成 |
+| 根据 completion key 找回连接 | [`src/net/tcp_server.cpp:288-292`](../src/net/tcp_server.cpp#L288-L292) | IOCP 返回之前绑定的 `Connection*`，再通过 `OVERLAPPED*` 找到本次操作上下文 |
+| 读完成后处理数据 | [`src/net/tcp_server.cpp:301-310`](../src/net/tcp_server.cpp#L301-L310) | 如果是 `recv` 完成，统计读取字节，调用 `on_message_` 生成响应 |
+| 提交异步写 | [`src/net/tcp_server.cpp:309`](../src/net/tcp_server.cpp#L309), [`src/net/tcp_server.cpp:243-272`](../src/net/tcp_server.cpp#L243-L272) | `post_send()` 把响应放入发送上下文，调用 `WSASend()` 提交异步写 |
+| 写完成后继续读 | [`src/net/tcp_server.cpp:313-320`](../src/net/tcp_server.cpp#L313-L320) | 如果是 `send` 完成，统计写入字节，然后再次 `post_recv()` 等下一条消息 |
+| 客户端关闭或 IO 错误 | [`src/net/tcp_server.cpp:294-298`](../src/net/tcp_server.cpp#L294-L298) | `GetQueuedCompletionStatus()` 失败或传输字节为 0 时，进入关闭流程 |
+| 关闭连接 | [`src/net/tcp_server.cpp:332-342`](../src/net/tcp_server.cpp#L332-L342) | 标记连接关闭并关闭 socket |
+| 没有未完成 IO 后释放连接 | [`src/net/tcp_server.cpp:324-330`](../src/net/tcp_server.cpp#L324-L330), [`src/net/tcp_server.cpp:344-358`](../src/net/tcp_server.cpp#L344-L358) | `pending_operations` 归零后，从 `connections_` 删除连接对象 |
+| 停止服务器唤醒 worker | [`src/net/tcp_server.cpp:84-98`](../src/net/tcp_server.cpp#L84-L98) | `stop()` 关闭监听 socket，并用 `PostQueuedCompletionStatus()` 唤醒 worker 退出 |
 
 注意：当前 Windows 版本为了先打通 IOCP 主干，accept 阶段仍使用独立线程里的 `accept()`。后续如果要进一步冲击百万连接，下一步应改成 `AcceptEx`，让接收新连接本身也变成 IOCP 异步完成事件。
 

@@ -58,13 +58,21 @@ docs/LEARNING_ROADMAP.md
 ├── include/
 │   └── cpp20_server/
 │       └── net/
+│           ├── acceptor.h
 │           ├── buffer.h
+│           ├── channel.h
+│           ├── connection.h
+│           ├── event_loop.h
 │           ├── poller.h
 │           ├── socket.h
 │           └── tcp_server.h
 └── src/
     └── net/
+        ├── acceptor.cpp
         ├── buffer.cpp
+        ├── channel.cpp
+        ├── connection.cpp
+        ├── event_loop.cpp
         ├── poller.cpp
         ├── socket.cpp
         └── tcp_server.cpp
@@ -73,11 +81,15 @@ docs/LEARNING_ROADMAP.md
 核心模块说明：
 
 ```text
-buffer      输出缓冲区
-socket      跨平台 socket 封装
-poller      epoll/kqueue/select 的统一事件接口
-tcp_server  TCP 服务器主逻辑，Windows IOCP 也在这里实现
-examples    示例程序
+acceptor     监听 socket，专门负责 accept 新连接
+buffer       输出缓冲区
+channel      一个 fd 关心的事件和回调
+connection   单个客户端连接的读写状态
+event_loop   Reactor 事件循环
+poller       epoll/kqueue/select 的统一事件接口
+socket       跨平台 socket 封装
+tcp_server   TCP 服务器入口，Windows IOCP 也在这里实现
+examples     示例程序
 ```
 
 如果你想先理解为什么这种结构能支撑高并发，可以先看：

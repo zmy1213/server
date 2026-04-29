@@ -1,6 +1,5 @@
 #include "cpp20_server/net/tcp_server.h"
 
-#include "cpp20_server/net/buffer.h"
 #include "cpp20_server/net/socket.h"
 
 #include <algorithm>
@@ -8,7 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
-#include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -21,35 +20,17 @@
 #include <mswsock.h>
 #include <windows.h>
 #else
-#include "cpp20_server/net/poller.h"
-
-#if defined(_WIN32)
-#include <winsock2.h>
-#else
-#include <netinet/in.h>
-#include <sys/socket.h>
-#endif
+#include "cpp20_server/net/acceptor.h"
+#include "cpp20_server/net/connection.h"
+#include "cpp20_server/net/event_loop.h"
 #endif
 
 namespace cpp20_server::net {
 
 namespace {
 
+#if defined(CPP20_SERVER_USE_IOCP)
 constexpr std::size_t read_buffer_size = 64 * 1024;
-
-int safe_io_size(std::size_t value) noexcept {
-    const auto max_value = static_cast<std::size_t>(std::numeric_limits<int>::max());
-    return static_cast<int>(std::min(value, max_value));
-}
-
-#if !defined(CPP20_SERVER_USE_IOCP)
-int send_flags() noexcept {
-#if defined(MSG_NOSIGNAL)
-    return MSG_NOSIGNAL;
-#else
-    return 0;
-#endif
-}
 #endif
 
 } // namespace
@@ -410,15 +391,12 @@ class TcpServer::Impl {
 public:
     explicit Impl(TcpServerOptions options)
         : options_(std::move(options)),
-          poller_(options_.max_events),
+          loop_(options_.max_events),
           on_message_([](std::string_view message) { return std::string{message}; }) {}
 
     ~Impl() {
-        for (auto& [_, connection] : connections_) {
-            close_socket(connection.fd);
-        }
-        connections_.clear();
-        close_socket(listen_fd_);
+        close_all_connections();
+        acceptor_.reset();
     }
 
     void set_message_callback(MessageCallback callback) {
@@ -426,44 +404,19 @@ public:
     }
 
     void start() {
-        listen_fd_ = create_listening_socket(options_.host, options_.port, options_.backlog);
-        poller_.add(listen_fd_, Event::read);
+        acceptor_ = std::make_unique<Acceptor>(loop_, options_.host, options_.port, options_.backlog);
+        acceptor_->set_new_connection_callback([this](socket_t client_fd) {
+            handle_new_connection(client_fd);
+        });
 
         std::cout << "listening on " << options_.host << ':' << options_.port
                   << " backend=" << backend_name() << '\n';
 
-        while (!stopping_.load()) {
-            auto events = poller_.wait(std::chrono::milliseconds{1000});
-            for (const auto& event : events) {
-                if (event.fd == listen_fd_) {
-                    handle_accept();
-                    continue;
-                }
-
-                if (has_event(event.events, Event::read)) {
-                    handle_read(event.fd);
-                }
-
-                if (connections_.contains(event.fd) && has_event(event.events, Event::write)) {
-                    handle_write(event.fd);
-                }
-
-                if (connections_.contains(event.fd)
-                    && (has_event(event.events, Event::error) || has_event(event.events, Event::close))) {
-                    auto& connection = connections_.at(event.fd);
-                    if (connection.output.empty()) {
-                        close_connection(event.fd);
-                    } else {
-                        connection.close_after_write = true;
-                        enable_write(connection);
-                    }
-                }
-            }
-        }
+        loop_.loop();
     }
 
     void stop() noexcept {
-        stopping_.store(true);
+        loop_.stop();
     }
 
     [[nodiscard]] const TcpServerOptions& options() const noexcept {
@@ -475,136 +428,28 @@ public:
     }
 
     [[nodiscard]] const char* backend_name() const noexcept {
-        return poller_.backend_name();
+        return loop_.backend_name();
     }
 
 private:
-    struct Connection {
-        socket_t fd{invalid_socket};
-        Buffer output;
-        bool close_after_write{false};
-    };
-
-    void handle_accept() {
-        for (;;) {
-            sockaddr_storage peer_addr{};
-#if defined(_WIN32)
-            int peer_len = sizeof(peer_addr);
-#else
-            socklen_t peer_len = sizeof(peer_addr);
-#endif
-            socket_t client = ::accept(listen_fd_,
-                                       reinterpret_cast<sockaddr*>(&peer_addr),
-                                       &peer_len);
-            if (client == invalid_socket) {
-                auto error = last_socket_error();
-                if (is_would_block(error) || is_interrupted(error)) {
-                    return;
-                }
-                throw std::system_error(error, "accept failed");
-            }
-
-            try {
-                set_non_blocking(client);
-                set_no_delay(client);
-                poller_.add(client, Event::read);
-                connections_.emplace(client, Connection{client, Buffer{}, false});
-                ++stats_.accepted_connections;
-                stats_.active_connections = static_cast<std::uint64_t>(connections_.size());
-            } catch (...) {
-                close_socket(client);
-                throw;
-            }
-        }
-    }
-
-    void handle_read(socket_t fd) {
-        auto it = connections_.find(fd);
-        if (it == connections_.end()) {
-            return;
-        }
-
-        std::array<char, read_buffer_size> buffer{};
-        for (;;) {
-            const auto n = ::recv(fd, buffer.data(), safe_io_size(buffer.size()), 0);
-            if (n > 0) {
-                stats_.bytes_read += static_cast<std::uint64_t>(n);
-                std::string response = on_message_(std::string_view{buffer.data(), static_cast<std::size_t>(n)});
-                if (!response.empty()) {
-                    it->second.output.append(response);
-                }
-                continue;
-            }
-
-            if (n == 0) {
-                if (it->second.output.empty()) {
-                    close_connection(fd);
-                } else {
-                    it->second.close_after_write = true;
-                    enable_write(it->second);
-                }
-                return;
-            }
-
-            auto error = last_socket_error();
-            if (is_interrupted(error)) {
-                continue;
-            }
-            if (is_would_block(error)) {
-                break;
-            }
-
+    void handle_new_connection(socket_t client_fd) {
+        auto connection = std::make_unique<Connection>(loop_, client_fd);
+        connection->set_message_callback(on_message_);
+        connection->set_bytes_read_callback([this](std::size_t bytes) {
+            stats_.bytes_read += static_cast<std::uint64_t>(bytes);
+        });
+        connection->set_bytes_written_callback([this](std::size_t bytes) {
+            stats_.bytes_written += static_cast<std::uint64_t>(bytes);
+        });
+        connection->set_close_callback([this](socket_t fd) {
             close_connection(fd);
-            return;
-        }
+        });
 
-        if (connections_.contains(fd) && !it->second.output.empty()) {
-            enable_write(it->second);
-        }
-    }
-
-    void handle_write(socket_t fd) {
-        auto it = connections_.find(fd);
-        if (it == connections_.end()) {
-            return;
-        }
-
-        auto& connection = it->second;
-        while (!connection.output.empty()) {
-            const std::string_view data = connection.output.readable_view();
-            const auto n = ::send(fd,
-                                  data.data(),
-                                  safe_io_size(data.size()),
-                                  send_flags());
-            if (n > 0) {
-                connection.output.retrieve(static_cast<std::size_t>(n));
-                stats_.bytes_written += static_cast<std::uint64_t>(n);
-                continue;
-            }
-
-            auto error = last_socket_error();
-            if (is_interrupted(error)) {
-                continue;
-            }
-            if (is_would_block(error)) {
-                break;
-            }
-
-            close_connection(fd);
-            return;
-        }
-
-        if (connections_.contains(fd)) {
-            if (connection.output.empty()) {
-                if (connection.close_after_write) {
-                    close_connection(fd);
-                } else {
-                    disable_write(connection);
-                }
-            } else {
-                enable_write(connection);
-            }
-        }
+        auto* raw = connection.get();
+        connections_.emplace(client_fd, std::move(connection));
+        ++stats_.accepted_connections;
+        stats_.active_connections = static_cast<std::uint64_t>(connections_.size());
+        raw->start();
     }
 
     void close_connection(socket_t fd) noexcept {
@@ -612,32 +457,26 @@ private:
         if (it == connections_.end()) {
             return;
         }
-
-        try {
-            poller_.remove(fd);
-        } catch (...) {
-        }
-        close_socket(fd);
+        it->second->close();
         connections_.erase(it);
         stats_.active_connections = static_cast<std::uint64_t>(connections_.size());
     }
 
-    void enable_write(Connection& connection) {
-        poller_.modify(connection.fd, Event::read | Event::write);
-    }
-
-    void disable_write(Connection& connection) {
-        poller_.modify(connection.fd, Event::read);
+    void close_all_connections() noexcept {
+        for (auto& [_, connection] : connections_) {
+            connection->close();
+        }
+        connections_.clear();
+        stats_.active_connections = 0;
     }
 
     SocketRuntime runtime_;
     TcpServerOptions options_;
-    Poller poller_;
-    socket_t listen_fd_{invalid_socket};
-    std::unordered_map<socket_t, Connection> connections_;
+    EventLoop loop_;
+    std::unique_ptr<Acceptor> acceptor_;
+    std::unordered_map<socket_t, std::unique_ptr<Connection>> connections_;
     MessageCallback on_message_;
     ServerStats stats_;
-    std::atomic_bool stopping_{false};
 };
 
 #endif

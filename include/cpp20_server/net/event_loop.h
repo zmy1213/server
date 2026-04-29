@@ -1,0 +1,38 @@
+#pragma once
+
+#include "cpp20_server/net/poller.h"
+#include "cpp20_server/net/socket.h"
+
+#include <atomic>
+#include <cstddef>
+#include <unordered_map>
+
+namespace cpp20_server::net {
+
+class Channel;
+
+// EventLoop owns a Poller and dispatches fired events to Channel callbacks.
+// Linux/macOS use this Reactor loop. Windows IOCP has a separate Proactor path.
+class EventLoop {
+public:
+    explicit EventLoop(std::size_t max_events = 4096);
+    ~EventLoop();
+
+    EventLoop(const EventLoop&) = delete;
+    EventLoop& operator=(const EventLoop&) = delete;
+
+    void loop();
+    void stop() noexcept;
+
+    void update_channel(Channel& channel);
+    void remove_channel(Channel& channel);
+
+    [[nodiscard]] const char* backend_name() const noexcept;
+
+private:
+    Poller poller_;
+    std::unordered_map<socket_t, Channel*> channels_;
+    std::atomic_bool stopping_{false};
+};
+
+} // namespace cpp20_server::net

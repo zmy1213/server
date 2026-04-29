@@ -49,7 +49,13 @@ set(CPP20_SERVER_SOURCES
 )
 
 if(NOT CPP20_SERVER_RESOLVED_BACKEND STREQUAL "iocp")
-    list(APPEND CPP20_SERVER_SOURCES src/net/poller.cpp)
+    list(APPEND CPP20_SERVER_SOURCES
+        src/net/acceptor.cpp
+        src/net/channel.cpp
+        src/net/connection.cpp
+        src/net/event_loop.cpp
+        src/net/poller.cpp
+    )
 endif()
 
 add_library(cpp20_server ${CPP20_SERVER_SOURCES})
