@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cpp20_server/net/buffer.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -28,6 +30,7 @@ struct ServerStats {
 class TcpServer {
 public:
     using MessageCallback = std::function<std::string(std::string_view message)>;
+    using StreamCallback = std::function<void(Buffer& input, Buffer& output)>;
 
     explicit TcpServer(TcpServerOptions options);
     ~TcpServer();
@@ -36,6 +39,7 @@ public:
     TcpServer& operator=(const TcpServer&) = delete;
 
     void set_message_callback(MessageCallback callback);
+    void set_stream_callback(StreamCallback callback);
     void start();
     void stop() noexcept;
 

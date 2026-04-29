@@ -39,6 +39,20 @@ std::chrono::milliseconds idle_timeout(const TcpServerOptions& options) noexcept
         std::chrono::seconds{options.idle_timeout_seconds});
 }
 
+TcpServer::StreamCallback make_stream_callback(TcpServer::MessageCallback callback) {
+    return [callback = std::move(callback)](Buffer& input, Buffer& output) {
+        const auto message = input.readable_view();
+        if (message.empty()) {
+            return;
+        }
+        std::string response = callback(message);
+        input.retrieve(message.size());
+        if (!response.empty()) {
+            output.append(response);
+        }
+    };
+}
+
 #if defined(CPP20_SERVER_USE_IOCP)
 std::int64_t steady_now_milliseconds() noexcept {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -58,7 +72,7 @@ class TcpServer::Impl {
 public:
     explicit Impl(TcpServerOptions options)
         : options_(std::move(options)),
-          on_message_([](std::string_view message) { return std::string{message}; }) {}
+          on_stream_(make_stream_callback([](std::string_view message) { return std::string{message}; })) {}
 
     ~Impl() {
         stop();
@@ -71,7 +85,11 @@ public:
     }
 
     void set_message_callback(MessageCallback callback) {
-        on_message_ = std::move(callback);
+        on_stream_ = make_stream_callback(std::move(callback));
+    }
+
+    void set_stream_callback(StreamCallback callback) {
+        on_stream_ = std::move(callback);
     }
 
     void start() {
@@ -143,6 +161,8 @@ private:
         socket_t fd{invalid_socket};
         IoContext recv_context{};
         IoContext send_context{};
+        Buffer input{};
+        Buffer output{};
         std::atomic_int pending_operations{0};
         std::atomic_bool closing{false};
         std::atomic_bool socket_closed{false};
@@ -261,14 +281,15 @@ private:
         }
     }
 
-    void post_send(Connection* connection, std::string_view data) {
-        if (connection == nullptr || connection->closing.load() || data.empty()) {
+    void post_send(Connection* connection) {
+        if (connection == nullptr || connection->closing.load() || connection->output.empty()) {
             return;
         }
 
         auto& context = connection->send_context;
         context = IoContext{};
         context.operation = IoOperation::send;
+        const auto data = connection->output.readable_view();
         const std::size_t size = std::min(data.size(), context.storage.size());
         std::copy_n(data.data(), size, context.storage.data());
         context.wsabuf.buf = context.storage.data();
@@ -325,21 +346,33 @@ private:
                     std::scoped_lock lock(stats_mutex_);
                     stats_.bytes_read += transferred;
                 }
-                std::string response = on_message_(
+                connection->input.append(
                     std::string_view{context->storage.data(), static_cast<std::size_t>(transferred)});
+                if (on_stream_) {
+                    on_stream_(connection->input, connection->output);
+                }
                 finish_operation(connection);
-                post_send(connection, response);
+                if (!connection->output.empty()) {
+                    post_send(connection);
+                } else {
+                    post_recv(connection);
+                }
                 continue;
             }
 
             if (context->operation == IoOperation::send) {
                 connection->last_active_ms.store(steady_now_milliseconds(), std::memory_order_relaxed);
+                connection->output.retrieve(static_cast<std::size_t>(transferred));
                 {
                     std::scoped_lock lock(stats_mutex_);
                     stats_.bytes_written += transferred;
                 }
                 finish_operation(connection);
-                post_recv(connection);
+                if (!connection->output.empty()) {
+                    post_send(connection);
+                } else {
+                    post_recv(connection);
+                }
             }
         }
     }
@@ -379,7 +412,7 @@ private:
             if (connection->socket_closed.load()) {
                 continue;
             }
-            close_connection_socket(connection);
+            close_connection_socket(connection.get());
         }
     }
 
@@ -442,7 +475,7 @@ private:
     TcpServerOptions options_;
     socket_t listen_fd_{invalid_socket};
     HANDLE iocp_{nullptr};
-    MessageCallback on_message_;
+    StreamCallback on_stream_;
     ServerStats stats_;
     mutable std::mutex stats_mutex_;
     std::atomic_bool stopping_{false};
@@ -465,7 +498,7 @@ public:
     explicit Impl(TcpServerOptions options)
         : options_(std::move(options)),
           accept_loop_(options_.max_events),
-          on_message_([](std::string_view message) { return std::string{message}; }) {}
+          on_stream_(make_stream_callback([](std::string_view message) { return std::string{message}; })) {}
 
     ~Impl() {
         stop();
@@ -475,7 +508,11 @@ public:
     }
 
     void set_message_callback(MessageCallback callback) {
-        on_message_ = std::move(callback);
+        on_stream_ = make_stream_callback(std::move(callback));
+    }
+
+    void set_stream_callback(StreamCallback callback) {
+        on_stream_ = std::move(callback);
     }
 
     void start() {
@@ -562,7 +599,7 @@ private:
 
     void create_connection(EventLoop& loop, socket_t client_fd) {
         auto connection = std::make_unique<Connection>(loop, client_fd);
-        connection->set_message_callback(on_message_);
+        connection->set_stream_callback(on_stream_);
         connection->set_bytes_read_callback([this](std::size_t bytes) {
             std::scoped_lock lock(stats_mutex_);
             stats_.bytes_read += static_cast<std::uint64_t>(bytes);
@@ -666,7 +703,7 @@ private:
     std::mutex connections_mutex_;
     mutable std::mutex stats_mutex_;
     std::unordered_map<socket_t, std::unique_ptr<Connection>> connections_;
-    MessageCallback on_message_;
+    StreamCallback on_stream_;
     ServerStats stats_;
 };
 
@@ -679,6 +716,10 @@ TcpServer::~TcpServer() = default;
 
 void TcpServer::set_message_callback(MessageCallback callback) {
     impl_->set_message_callback(std::move(callback));
+}
+
+void TcpServer::set_stream_callback(StreamCallback callback) {
+    impl_->set_stream_callback(std::move(callback));
 }
 
 void TcpServer::start() {

@@ -370,7 +370,48 @@ curl http://127.0.0.1:8080/health
 curl -X POST http://127.0.0.1:8080/echo --data 'hello http'
 ```
 
-当前还是教学版最小 HTTP：测试用例保证完整请求一次发送。后续要给每个连接增加输入缓冲区，专门处理 TCP 半包、粘包和同一连接上的多个请求。
+当前项目状态：每个 `Connection` 已经增加输入缓冲区，HTTP 已支持半包、粘包和同一连接多个请求。
+
+为什么要输入缓冲区：
+
+```text
+TCP 是字节流
+recv() 不保证一次读到一个完整请求
+HTTP 协议需要自己判断一条请求从哪里开始、到哪里结束
+```
+
+没有输入缓冲区会出问题：
+
+```text
+半包：
+    第一次 recv 只读到请求头一半
+    如果马上解析，就会误判请求错误
+
+粘包：
+    一次 recv 读到两个请求
+    如果只处理一个，第二个请求会丢失
+
+同连接多个请求：
+    客户端复用 TCP 连接继续发请求
+    服务器必须保留这个连接上的未解析数据
+```
+
+当前做法：
+
+```text
+Connection::input_ 保存收到但未解析完成的数据
+HTTP parser 解析出一个完整请求后返回 bytes_consumed
+Connection 从 input_ 删除已消费字节
+如果 input_ 里还有数据，继续尝试解析下一个请求
+```
+
+对应接口：
+
+```text
+TcpServer::set_stream_callback()
+handle_demo_http_stream()
+try_parse_http_request()
+```
 
 自定义二进制协议：
 
@@ -748,6 +789,9 @@ TimerQueue 单次定时任务和重复定时任务
 Buffer 基础读写
 HTTP 请求解析
 HTTP 响应生成和路由
+HTTP 半包处理
+HTTP 粘包处理
+同一个 TCP 连接多个 HTTP 请求
 真实 TcpServer 单连接 Echo
 真实 TcpServer HTTP GET /health
 真实 TcpServer HTTP POST /echo
@@ -958,6 +1002,8 @@ Windows IOCP 主干代码
 Echo Server
 HTTP Server 第一版
 HTTP 请求解析和响应生成第一版
+Connection 输入缓冲区第一版
+HTTP 半包、粘包、同连接多请求处理第一版
 EventLoop / Channel / Acceptor / Connection 拆分
 多线程 Reactor 第一版
 TimerQueue 小根堆定时器第一版
@@ -970,23 +1016,20 @@ TimerQueue 小根堆定时器第一版
 下一步最合理的是：
 
 ```text
-补每个连接的输入缓冲区
+第 8 阶段：日志、配置、指标
 ```
 
-原因是 TCP 是字节流，真实网络里可能出现：
+也就是先做工程化基础能力：
 
 ```text
-一个 HTTP 请求分多次到达
-多个 HTTP 请求粘在一次 recv 里
-请求头到了但 body 还没到
+Logger
+Config
+Metrics
 ```
 
-输入缓冲区完善后，再进入：
+这些做完后，再进入：
 
 ```text
-异步日志
-配置文件
-运行指标
 压测
 系统调优
 ```

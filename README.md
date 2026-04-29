@@ -24,6 +24,7 @@ docs/LEARNING_ROADMAP.md
 - 支持 macOS、Linux、Windows
 - 支持非阻塞 TCP socket
 - 支持 Reactor 事件循环模型
+- 每个连接都有输入缓冲区和输出缓冲区
 - Linux 自动使用 `epoll`
 - macOS 自动使用 `kqueue`
 - Windows 自动使用 `IOCP`
@@ -387,6 +388,80 @@ src/net/tcp_server.cpp
 第 4 个参数：idle_timeout_seconds，0 表示不启用空闲超时
 ```
 
+## 最新代码说明：连接输入缓冲区
+
+这一轮代码给每个 `Connection` 增加了输入缓冲区，解决 HTTP 的半包、粘包和同一个连接多个请求问题。
+
+为什么要这么做：
+
+```text
+TCP 是字节流，不是消息队列
+recv() 读到多少字节是不固定的
+一次 recv() 不一定等于一个完整 HTTP 请求
+```
+
+真实网络里会出现三种情况：
+
+```text
+半包：
+    一个 HTTP 请求分两次甚至多次到达
+    第一次只收到请求头的一半，不能立刻解析
+
+粘包：
+    两个 HTTP 请求粘在同一次 recv() 里
+    服务器要能从里面拆出多个请求
+
+同连接多个请求：
+    客户端不关闭 TCP 连接
+    在同一个连接上连续发送多个 HTTP 请求
+```
+
+所以现在每个连接都有：
+
+```text
+input_   输入缓冲区，保存已经收到但还没解析完的数据
+output_  输出缓冲区，保存已经生成但还没发送完的数据
+```
+
+处理流程：
+
+```text
+recv() 读到字节
+        ↓
+追加到 Connection::input_
+        ↓
+HTTP parser 尝试从 input_ 里解析完整请求
+        ↓
+如果请求不完整：继续留在 input_，等待下次 recv()
+        ↓
+如果请求完整：生成响应，写入 output_
+        ↓
+从 input_ 删除已经消费的请求字节
+        ↓
+继续尝试解析下一个请求
+```
+
+核心代码：
+
+```text
+include/cpp20_server/net/connection.h
+src/net/connection.cpp
+include/cpp20_server/net/tcp_server.h
+src/net/tcp_server.cpp
+include/cpp20_server/protocol/http.h
+src/protocol/http.cpp
+```
+
+新增接口：
+
+```cpp
+server.set_stream_callback([](Buffer& input, Buffer& output) {
+    handle_demo_http_stream(input, output);
+});
+```
+
+`set_message_callback()` 仍然保留给 Echo 这种简单协议使用。HTTP 使用 `set_stream_callback()`，因为 HTTP 必须自己判断消息边界。
+
 ## 最新代码说明：最小 HTTP Server
 
 这一轮代码完成了第 6 阶段 / 第 13 阶段的第一版：最小 HTTP 协议层和 HTTP Server 示例。
@@ -430,7 +505,14 @@ curl http://127.0.0.1:8080/health
 curl -X POST http://127.0.0.1:8080/echo --data 'hello http'
 ```
 
-注意：当前 HTTP 是教学版最小实现，适合理解 HTTP 请求/响应主线。后续要继续增强每个连接的输入缓冲区，专门处理 TCP 半包、粘包和多个请求复用同一个连接。
+当前 HTTP 已经支持：
+
+```text
+完整请求一次到达
+一个请求分多次到达
+多个请求粘在一起到达
+同一个 TCP 连接连续发送多个请求
+```
 
 如果你想先理解为什么这种结构能支撑高并发，可以先看：
 
@@ -633,6 +715,9 @@ TimerQueue 单次定时任务和重复定时任务
 Buffer 基础读写
 HTTP 请求解析
 HTTP 响应生成和路由
+HTTP 半包处理
+HTTP 粘包处理
+同一个 TCP 连接多个 HTTP 请求
 真实 TcpServer 单连接 Echo
 真实 TcpServer HTTP GET /health
 真实 TcpServer HTTP POST /echo
@@ -656,17 +741,24 @@ warnings-as-errors 严格构建：100% tests passed, 0 tests failed out of 1
 [PASS] timer_queue (5 ms)
 [PASS] buffer (0 ms)
 [PASS] http_parser (0 ms)
+[PASS] http_stream (0 ms)
 [PASS] http_response_routes (0 ms)
-listening on 127.0.0.1:62535 backend=kqueue worker_threads=2
+listening on 127.0.0.1:50272 backend=kqueue worker_threads=2
 [PASS] single_connection_echo (102 ms)
-listening on 127.0.0.1:62538 backend=kqueue worker_threads=2
+listening on 127.0.0.1:50275 backend=kqueue worker_threads=2
 [PASS] http_server_health (102 ms)
-listening on 127.0.0.1:62541 backend=kqueue worker_threads=2
+listening on 127.0.0.1:50279 backend=kqueue worker_threads=2
 [PASS] http_server_post_echo (102 ms)
-listening on 127.0.0.1:62544 backend=kqueue worker_threads=4
-[PASS] concurrent_echo (104 ms)
-listening on 127.0.0.1:62611 backend=kqueue worker_threads=2
-[PASS] idle_timeout (1124 ms)
+listening on 127.0.0.1:50282 backend=kqueue worker_threads=2
+[PASS] http_server_partial_request (131 ms)
+listening on 127.0.0.1:50285 backend=kqueue worker_threads=2
+[PASS] http_server_sticky_requests (102 ms)
+listening on 127.0.0.1:50288 backend=kqueue worker_threads=2
+[PASS] http_server_same_connection (102 ms)
+listening on 127.0.0.1:50291 backend=kqueue worker_threads=4
+[PASS] concurrent_echo (105 ms)
+listening on 127.0.0.1:50357 backend=kqueue worker_threads=2
+[PASS] idle_timeout (1104 ms)
 All tests passed.
 ```
 
@@ -792,14 +884,13 @@ git remote set-url origin git@github.com:zmy1213/server.git
 
 ## 后续开发计划
 
-1. 增加每个连接的输入缓冲区，完善 HTTP 半包和粘包处理
-2. 增加异步日志
-3. 增加配置文件
-4. 增加运行指标
-5. 增加压测脚本
-6. 增加 Linux 百万连接参数调优文档
-7. 增加 Windows AcceptEx 批量异步接收连接
-8. 增加 GitHub Actions 跨平台构建测试
+1. 增加异步日志
+2. 增加配置文件
+3. 增加运行指标
+4. 增加压测脚本
+5. 增加 Linux 百万连接参数调优文档
+6. 增加 Windows AcceptEx 批量异步接收连接
+7. 增加 GitHub Actions 跨平台构建测试
 
 ## 当前阶段说明
 

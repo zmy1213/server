@@ -66,8 +66,8 @@ int main(int argc, char* argv[]) {
         std::signal(SIGINT, handle_signal);
         std::signal(SIGTERM, handle_signal);
 
-        server.set_message_callback([](std::string_view request) {
-            return cpp20_server::protocol::handle_demo_http_request(request);
+        server.set_stream_callback([](cpp20_server::net::Buffer& input, cpp20_server::net::Buffer& output) {
+            cpp20_server::protocol::handle_demo_http_stream(input, output);
         });
 
         server.start();

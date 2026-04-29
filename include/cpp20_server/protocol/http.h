@@ -1,5 +1,8 @@
 #pragma once
 
+#include "cpp20_server/net/buffer.h"
+
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -15,8 +18,14 @@ struct HttpRequest {
     std::string body;
 };
 
+struct HttpParseResult {
+    HttpRequest request;
+    std::size_t bytes_consumed{0};
+};
+
 // Returns std::nullopt when the byte stream does not contain a complete request yet.
 std::optional<HttpRequest> parse_http_request(std::string_view raw);
+std::optional<HttpParseResult> try_parse_http_request(std::string_view raw);
 
 std::string make_http_response(int status_code,
                                std::string_view reason,
@@ -27,6 +36,8 @@ std::string make_http_response(int status_code,
 // GET  /        -> hello http
 // GET  /health  -> ok
 // POST /echo    -> request body
+std::string handle_demo_http_request(const HttpRequest& request);
 std::string handle_demo_http_request(std::string_view raw_request);
+void handle_demo_http_stream(net::Buffer& input, net::Buffer& output);
 
 } // namespace cpp20_server::protocol

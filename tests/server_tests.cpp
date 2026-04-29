@@ -46,8 +46,10 @@ using cpp20_server::net::is_would_block;
 using cpp20_server::net::last_socket_error;
 using cpp20_server::net::socket_t;
 using cpp20_server::protocol::handle_demo_http_request;
+using cpp20_server::protocol::handle_demo_http_stream;
 using cpp20_server::protocol::make_http_response;
 using cpp20_server::protocol::parse_http_request;
+using cpp20_server::protocol::try_parse_http_request;
 
 void expect(bool condition, std::string_view message) {
     if (!condition) {
@@ -241,6 +243,54 @@ bool wait_until_remote_close(socket_t fd) {
     return false;
 }
 
+std::size_t http_body_size(std::string_view response) {
+    const auto header_end = response.find("\r\n\r\n");
+    if (header_end == std::string_view::npos) {
+        throw std::runtime_error("http response header is incomplete");
+    }
+
+    constexpr std::string_view header_name = "Content-Length:";
+    const auto content_length = response.find(header_name);
+    if (content_length == std::string_view::npos || content_length > header_end) {
+        throw std::runtime_error("http response is missing content-length");
+    }
+
+    auto value = response.substr(content_length + header_name.size());
+    const auto line_end = value.find("\r\n");
+    value = value.substr(0, line_end);
+    while (!value.empty() && value.front() == ' ') {
+        value.remove_prefix(1);
+    }
+
+    return static_cast<std::size_t>(std::stoul(std::string{value}));
+}
+
+std::string recv_one_http_response(socket_t fd, std::string& inbox) {
+    for (;;) {
+        const auto header_end = inbox.find("\r\n\r\n");
+        if (header_end != std::string::npos) {
+            const auto body_size = http_body_size(inbox);
+            const auto total_size = header_end + 4 + body_size;
+            if (inbox.size() >= total_size) {
+                std::string response = inbox.substr(0, total_size);
+                inbox.erase(0, total_size);
+                return response;
+            }
+        }
+
+        char buffer[4096]{};
+        const auto n = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (n > 0) {
+            inbox.append(buffer, static_cast<std::size_t>(n));
+            continue;
+        }
+        if (n == 0) {
+            throw std::runtime_error("server closed before a complete http response arrived");
+        }
+        throw std::system_error(last_socket_error(), "client recv failed");
+    }
+}
+
 class RunningServer {
 public:
     RunningServer(std::uint16_t port,
@@ -261,6 +311,30 @@ public:
                 return std::string{message};
             });
         }
+
+        thread_ = std::thread([this] {
+            try {
+                server_->start();
+            } catch (...) {
+                server_error_ = std::current_exception();
+            }
+        });
+
+        wait_until_ready();
+    }
+
+    RunningServer(std::uint16_t port,
+                  std::size_t worker_threads,
+                  std::uint64_t idle_timeout_seconds,
+                  TcpServer::StreamCallback callback)
+        : port_(port) {
+        TcpServerOptions options;
+        options.host = "127.0.0.1";
+        options.port = port;
+        options.worker_threads = worker_threads;
+        options.idle_timeout_seconds = idle_timeout_seconds;
+        server_ = std::make_unique<TcpServer>(std::move(options));
+        server_->set_stream_callback(std::move(callback));
 
         thread_ = std::thread([this] {
             try {
@@ -368,8 +442,32 @@ void test_http_parser() {
     expect(parsed->headers.at("host") == "localhost", "http host header should be parsed");
     expect(parsed->body == "hello http", "http body should match content-length");
 
+    const auto parsed_with_size = try_parse_http_request(request + "GET /health HTTP/1.1\r\n\r\n");
+    expect(parsed_with_size.has_value(), "http parser should report consumed bytes");
+    expect(parsed_with_size->bytes_consumed == request.size(),
+           "http parser consumed size should stop after first request");
+
     const auto incomplete = parse_http_request("GET /health HTTP/1.1\r\nHost: localhost\r\n");
     expect(!incomplete.has_value(), "http parser should wait for complete header");
+}
+
+void test_http_stream_handles_partial_and_sticky_requests() {
+    Buffer input;
+    Buffer output;
+
+    input.append("POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n\r\nhello");
+    handle_demo_http_stream(input, output);
+    expect(output.empty(), "partial http request should not produce a response yet");
+    expect(!input.empty(), "partial http request should stay in input buffer");
+
+    input.append(" worldGET /health HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    handle_demo_http_stream(input, output);
+    const auto responses = output.readable_view();
+    expect(responses.find("hello world") != std::string_view::npos,
+           "completed partial request should echo body");
+    expect(responses.find("ok\n") != std::string_view::npos,
+           "sticky second request should also be handled");
+    expect(input.empty(), "all complete sticky requests should be consumed");
 }
 
 void test_http_response_routes() {
@@ -404,9 +502,9 @@ void test_single_connection_echo() {
 
 void test_http_server_health() {
     const std::uint16_t port = find_free_loopback_port();
-    RunningServer server{port, 2, 0, [](std::string_view request) {
-        return handle_demo_http_request(request);
-    }};
+    RunningServer server{port, 2, 0, TcpServer::StreamCallback{[](Buffer& input, Buffer& output) {
+        handle_demo_http_stream(input, output);
+    }}};
 
     const std::string response = request_once(
         port,
@@ -419,9 +517,9 @@ void test_http_server_health() {
 
 void test_http_server_post_echo() {
     const std::uint16_t port = find_free_loopback_port();
-    RunningServer server{port, 2, 0, [](std::string_view request) {
-        return handle_demo_http_request(request);
-    }};
+    RunningServer server{port, 2, 0, TcpServer::StreamCallback{[](Buffer& input, Buffer& output) {
+        handle_demo_http_stream(input, output);
+    }}};
 
     const std::string response = request_once(
         port,
@@ -433,6 +531,87 @@ void test_http_server_post_echo() {
     expect(response.find("HTTP/1.1 200 OK\r\n") == 0, "http server POST /echo should return 200");
     expect(response.find("\r\n\r\nhello server") != std::string::npos,
            "http server POST /echo should echo request body");
+}
+
+void test_http_server_partial_request() {
+    const std::uint16_t port = find_free_loopback_port();
+    RunningServer server{port, 2, 0, TcpServer::StreamCallback{[](Buffer& input, Buffer& output) {
+        handle_demo_http_stream(input, output);
+    }}};
+
+    socket_t fd = connect_to(port);
+    try {
+        send_all(fd, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n\r\nhello");
+        std::this_thread::sleep_for(std::chrono::milliseconds{80});
+        send_all(fd, " world");
+        shutdown_write(fd);
+        const std::string response = recv_until_close(fd);
+        close_socket(fd);
+        expect(response.find("HTTP/1.1 200 OK\r\n") == 0,
+               "partial http request should eventually return 200");
+        expect(response.find("\r\n\r\nhello world") != std::string::npos,
+               "partial http request should keep first half in input buffer");
+    } catch (...) {
+        close_socket(fd);
+        throw;
+    }
+}
+
+void test_http_server_sticky_requests() {
+    const std::uint16_t port = find_free_loopback_port();
+    RunningServer server{port, 2, 0, TcpServer::StreamCallback{[](Buffer& input, Buffer& output) {
+        handle_demo_http_stream(input, output);
+    }}};
+
+    const std::string response = request_once(
+        port,
+        "GET /health HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "\r\n"
+        "POST /echo HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Length: 5\r\n"
+        "\r\n"
+        "hello");
+    const auto first = response.find("HTTP/1.1 200 OK\r\n");
+    const auto second = response.find("HTTP/1.1 200 OK\r\n", first + 1);
+    expect(first != std::string::npos, "sticky requests should produce first response");
+    expect(second != std::string::npos, "sticky requests should produce second response");
+    expect(response.find("\r\n\r\nok\n") != std::string::npos,
+           "sticky first response should be health body");
+    expect(response.find("\r\n\r\nhello") != std::string::npos,
+           "sticky second response should be echo body");
+}
+
+void test_http_server_multiple_requests_same_connection() {
+    const std::uint16_t port = find_free_loopback_port();
+    RunningServer server{port, 2, 0, TcpServer::StreamCallback{[](Buffer& input, Buffer& output) {
+        handle_demo_http_stream(input, output);
+    }}};
+
+    socket_t fd = connect_to(port);
+    std::string inbox;
+    try {
+        send_all(fd, "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        const std::string first = recv_one_http_response(fd, inbox);
+        expect(first.find("\r\n\r\nok\n") != std::string::npos,
+               "first keep-alive request should return health body");
+
+        send_all(fd,
+                 "POST /echo HTTP/1.1\r\n"
+                 "Host: localhost\r\n"
+                 "Content-Length: 6\r\n"
+                 "\r\n"
+                 "second");
+        shutdown_write(fd);
+        const std::string second = recv_one_http_response(fd, inbox);
+        close_socket(fd);
+        expect(second.find("\r\n\r\nsecond") != std::string::npos,
+               "second request on same connection should return echo body");
+    } catch (...) {
+        close_socket(fd);
+        throw;
+    }
 }
 
 void test_concurrent_echo() {
@@ -506,10 +685,14 @@ int main() {
         run_test("timer_queue", test_timer_queue);
         run_test("buffer", test_buffer);
         run_test("http_parser", test_http_parser);
+        run_test("http_stream", test_http_stream_handles_partial_and_sticky_requests);
         run_test("http_response_routes", test_http_response_routes);
         run_test("single_connection_echo", test_single_connection_echo);
         run_test("http_server_health", test_http_server_health);
         run_test("http_server_post_echo", test_http_server_post_echo);
+        run_test("http_server_partial_request", test_http_server_partial_request);
+        run_test("http_server_sticky_requests", test_http_server_sticky_requests);
+        run_test("http_server_same_connection", test_http_server_multiple_requests_same_connection);
         run_test("concurrent_echo", test_concurrent_echo);
         run_test("idle_timeout", test_idle_timeout_closes_inactive_connection);
         std::cout << "All tests passed.\n";

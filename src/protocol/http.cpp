@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <sstream>
 #include <system_error>
+#include <utility>
 
 namespace cpp20_server::protocol {
 
@@ -57,7 +58,7 @@ void parse_header_line(HttpRequest& request, std::string_view line) {
 
 } // namespace
 
-std::optional<HttpRequest> parse_http_request(std::string_view raw) {
+std::optional<HttpParseResult> try_parse_http_request(std::string_view raw) {
     const auto header_end = raw.find("\r\n\r\n");
     if (header_end == std::string_view::npos) {
         return std::nullopt;
@@ -106,7 +107,15 @@ std::optional<HttpRequest> parse_http_request(std::string_view raw) {
     }
 
     request.body = std::string{raw.substr(body_start, content_length)};
-    return request;
+    return HttpParseResult{std::move(request), body_start + content_length};
+}
+
+std::optional<HttpRequest> parse_http_request(std::string_view raw) {
+    const auto result = try_parse_http_request(raw);
+    if (!result) {
+        return std::nullopt;
+    }
+    return result->request;
 }
 
 std::string make_http_response(int status_code,
@@ -117,10 +126,24 @@ std::string make_http_response(int status_code,
     response << "HTTP/1.1 " << status_code << ' ' << reason << "\r\n"
              << "Content-Length: " << body.size() << "\r\n"
              << "Content-Type: " << content_type << "\r\n"
-             << "Connection: close\r\n"
+             << "Connection: keep-alive\r\n"
              << "\r\n"
              << body;
     return response.str();
+}
+
+std::string handle_demo_http_request(const HttpRequest& request) {
+    if (request.method == "GET" && request.path == "/") {
+        return make_http_response(200, "OK", "hello http\n");
+    }
+    if (request.method == "GET" && request.path == "/health") {
+        return make_http_response(200, "OK", "ok\n");
+    }
+    if (request.method == "POST" && request.path == "/echo") {
+        return make_http_response(200, "OK", request.body);
+    }
+
+    return make_http_response(404, "Not Found", "not found\n");
 }
 
 std::string handle_demo_http_request(std::string_view raw_request) {
@@ -128,18 +151,20 @@ std::string handle_demo_http_request(std::string_view raw_request) {
     if (!request) {
         return make_http_response(400, "Bad Request", "bad request\n");
     }
+    return handle_demo_http_request(*request);
+}
 
-    if (request->method == "GET" && request->path == "/") {
-        return make_http_response(200, "OK", "hello http\n");
-    }
-    if (request->method == "GET" && request->path == "/health") {
-        return make_http_response(200, "OK", "ok\n");
-    }
-    if (request->method == "POST" && request->path == "/echo") {
-        return make_http_response(200, "OK", request->body);
-    }
+void handle_demo_http_stream(net::Buffer& input, net::Buffer& output) {
+    for (;;) {
+        const auto parsed = try_parse_http_request(input.readable_view());
+        if (!parsed) {
+            // Not enough bytes yet. Leave them in input and wait for the next recv().
+            return;
+        }
 
-    return make_http_response(404, "Not Found", "not found\n");
+        output.append(handle_demo_http_request(parsed->request));
+        input.retrieve(parsed->bytes_consumed);
+    }
 }
 
 } // namespace cpp20_server::protocol

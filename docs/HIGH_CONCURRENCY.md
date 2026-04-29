@@ -977,7 +977,70 @@ HTTP 模块负责看懂这些字节是什么意思
 业务代码根据 path 决定返回什么
 ```
 
-当前 HTTP 还是最小教学版。真实服务器后续要继续加强输入缓冲区，因为 TCP 可能把一个 HTTP 请求拆成多次到达，也可能把多个 HTTP 请求粘在一起到达。
+当前 HTTP 仍然是教学版最小实现，但已经接入连接输入缓冲区，可以处理请求分多次到达、多个请求粘在一起到达、同一个连接连续发送多个请求这些基础字节流问题。
+
+## 为什么每个连接需要输入缓冲区
+
+TCP 不是“发一条、收一条”的消息队列，而是连续字节流。
+
+这意味着客户端这样发送：
+
+```text
+请求 A
+请求 B
+```
+
+服务端 `recv()` 看到的可能是：
+
+```text
+情况 1：一次正好读到完整请求 A
+情况 2：第一次只读到请求 A 的一半
+情况 3：一次读到请求 A + 请求 B
+情况 4：第一次读到请求 A + 请求 B 的一半
+```
+
+如果服务器把“一次 recv()”当成“一条完整 HTTP 请求”，就会出错。
+
+输入缓冲区解决这个问题：
+
+```text
+recv() 读到字节
+        ↓
+追加到 Connection::input_
+        ↓
+协议解析器检查 input_ 里有没有完整请求
+        ↓
+没有完整请求：不响应，继续等下一次 recv()
+        ↓
+有完整请求：生成响应，删除已消费字节
+        ↓
+input_ 里还有数据：继续解析下一个请求
+```
+
+对应代码：
+
+| 功能 | 代码位置 | 说明 |
+| --- | --- | --- |
+| 连接输入缓冲区 | [`include/cpp20_server/net/connection.h`](../include/cpp20_server/net/connection.h), [`src/net/connection.cpp`](../src/net/connection.cpp) | `Connection::input_` 保存未解析完的数据 |
+| 字节流回调接口 | [`include/cpp20_server/net/tcp_server.h`](../include/cpp20_server/net/tcp_server.h), [`src/net/tcp_server.cpp`](../src/net/tcp_server.cpp) | `set_stream_callback()` 让协议层直接处理 input/output buffer |
+| HTTP 消费字节数 | [`include/cpp20_server/protocol/http.h`](../include/cpp20_server/protocol/http.h), [`src/protocol/http.cpp`](../src/protocol/http.cpp) | `try_parse_http_request()` 返回 `bytes_consumed` |
+| HTTP 流式处理 | [`src/protocol/http.cpp`](../src/protocol/http.cpp) | `handle_demo_http_stream()` 循环解析多个完整请求 |
+| HTTP 示例接入 | [`examples/http_server.cpp`](../examples/http_server.cpp) | 使用 `set_stream_callback()` 而不是一次 recv 一个请求 |
+
+小白理解：
+
+```text
+output buffer 解决“响应一次 send 不完”
+input buffer 解决“请求一次 recv 不完整，或者一次 recv 太多”
+```
+
+这一步之后，HTTP 示例已经能处理：
+
+```text
+半包：一个请求分多次到达
+粘包：多个请求一次到达
+同连接多请求：同一个 TCP 连接连续发送多个 HTTP 请求
+```
 
 ## 但是百万连接不只靠代码
 
@@ -1027,6 +1090,9 @@ TimerQueue 单次和重复定时任务
 验证 Buffer 基础读写是否正确
 验证 HTTP 请求解析
 验证 HTTP 响应生成和示例路由
+验证 HTTP 半包处理
+验证 HTTP 粘包处理
+验证同一个 TCP 连接多个 HTTP 请求
 启动真实 TcpServer 验证单连接 Echo
 启动真实 TcpServer 验证 HTTP GET /health
 启动真实 TcpServer 验证 HTTP POST /echo

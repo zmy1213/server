@@ -34,8 +34,8 @@ int send_flags() noexcept {
 Connection::Connection(EventLoop& loop, socket_t fd)
     : loop_(loop),
       fd_(fd),
-      channel_(loop_, fd_),
-      message_callback_([](std::string_view message) { return std::string{message}; }) {
+      channel_(loop_, fd_) {
+    set_message_callback([](std::string_view message) { return std::string{message}; });
     channel_.set_read_callback([this] { handle_read(); });
     channel_.set_write_callback([this] { handle_write(); });
     channel_.set_close_callback([this] { handle_peer_close(); });
@@ -47,7 +47,21 @@ Connection::~Connection() {
 }
 
 void Connection::set_message_callback(MessageCallback callback) {
-    message_callback_ = std::move(callback);
+    stream_callback_ = [callback = std::move(callback)](Buffer& input, Buffer& output) {
+        const auto message = input.readable_view();
+        if (message.empty()) {
+            return;
+        }
+        std::string response = callback(message);
+        input.retrieve(message.size());
+        if (!response.empty()) {
+            output.append(response);
+        }
+    };
+}
+
+void Connection::set_stream_callback(StreamCallback callback) {
+    stream_callback_ = std::move(callback);
 }
 
 void Connection::set_close_callback(CloseCallback callback) {
@@ -104,10 +118,11 @@ void Connection::handle_read() {
             if (bytes_read_callback_) {
                 bytes_read_callback_(static_cast<std::size_t>(n));
             }
-            std::string response = message_callback_(
-                std::string_view{buffer.data(), static_cast<std::size_t>(n)});
-            if (!response.empty()) {
-                output_.append(response);
+            // TCP is a byte stream: one recv may contain half a request or many requests.
+            // Keep unread bytes in input_ until the protocol layer consumes them.
+            input_.append(std::string_view{buffer.data(), static_cast<std::size_t>(n)});
+            if (stream_callback_) {
+                stream_callback_(input_, output_);
             }
             continue;
         }
