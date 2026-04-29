@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(CPP20_SERVER_BUILD_EXAMPLES "Build example programs" ON)
+option(CPP20_SERVER_BUILD_TESTS "Build test programs" ON)
 option(CPP20_SERVER_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 set(CPP20_SERVER_BACKEND "auto" CACHE STRING "I/O backend: auto, epoll, kqueue, iocp, select")
@@ -103,6 +104,14 @@ endif()
 if(CPP20_SERVER_BUILD_EXAMPLES)
     add_executable(echo_server examples/echo_server.cpp)
     target_link_libraries(echo_server PRIVATE cpp20_server)
+endif()
+
+if(CPP20_SERVER_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(server_tests tests/server_tests.cpp)
+    target_link_libraries(server_tests PRIVATE cpp20_server)
+    add_test(NAME server_tests COMMAND server_tests)
 endif()
 
 message(STATUS "cpp20_server backend: ${CPP20_SERVER_RESOLVED_BACKEND}")

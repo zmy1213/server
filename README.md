@@ -66,7 +66,7 @@ docs/LEARNING_ROADMAP.md
 │           ├── poller.h
 │           ├── socket.h
 │           └── tcp_server.h
-└── src/
+├── src/
     └── net/
         ├── acceptor.cpp
         ├── buffer.cpp
@@ -76,6 +76,8 @@ docs/LEARNING_ROADMAP.md
         ├── poller.cpp
         ├── socket.cpp
         └── tcp_server.cpp
+└── tests/
+    └── server_tests.cpp
 ```
 
 核心模块说明：
@@ -90,6 +92,7 @@ poller       epoll/kqueue/select 的统一事件接口
 socket       跨平台 socket 封装
 tcp_server   TCP 服务器入口，Windows IOCP 也在这里实现
 examples     示例程序
+tests        自动化功能测试
 ```
 
 ## 本轮代码说明：Reactor 拆分
@@ -197,7 +200,7 @@ TcpServer 不再什么都管
 select 后端构建通过
 warnings-as-errors 严格构建通过
 单连接 echo 测试通过
-100 并发 echo 测试通过
+64 并发 echo 测试通过
 ```
 
 第 4 阶段已经完成第一版拆分；下一轮已经继续进入第 5 阶段：多线程 Reactor。
@@ -297,7 +300,7 @@ select 后端构建通过
 warnings-as-errors 严格构建通过
 启动时显示 worker_threads=8
 单连接 echo 测试通过
-200 并发 echo 测试通过
+64 并发 echo 测试通过
 ```
 
 下一步建议进入第 7 阶段前的准备：先补定时器和连接超时回收。
@@ -431,6 +434,59 @@ cmake --build build --config Release
 .\build\echo_server.exe 0.0.0.0 8080
 ```
 
+## 功能测试
+
+当前已经加入第一版自动化测试，入口文件：
+
+```text
+tests/server_tests.cpp
+```
+
+构建并运行测试：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+ctest --test-dir build --output-on-failure
+```
+
+也可以直接运行测试程序，看到每个测试项：
+
+```bash
+./build/server_tests
+```
+
+当前测试覆盖：
+
+```text
+Buffer 基础读写
+真实 TcpServer 单连接 Echo
+真实 TcpServer 64 客户端并发 Echo
+worker_threads=2 的启动和回显
+worker_threads=4 的并发回显
+```
+
+本机 macOS 当前测试结果：
+
+```text
+默认 kqueue 后端：100% tests passed, 0 tests failed out of 1
+select 后端：100% tests passed, 0 tests failed out of 1
+warnings-as-errors 严格构建：100% tests passed, 0 tests failed out of 1
+```
+
+直接运行 `./build/server_tests` 的输出示例：
+
+```text
+[PASS] buffer (0 ms)
+listening on 127.0.0.1:57323 backend=kqueue worker_threads=2
+[PASS] single_connection_echo (101 ms)
+listening on 127.0.0.1:57326 backend=kqueue worker_threads=4
+[PASS] concurrent_echo (104 ms)
+All tests passed.
+```
+
+这轮测试还发现并修复了一个兼容性问题：`select` 后端在客户端半关闭写端后会把 EOF 报成可读事件，如果先处理读事件，可能导致已经准备好的回包来不及发送。现在 `Channel::handle_event()` 会优先处理写事件，再处理读事件。
+
 ## 指定 IO 后端
 
 默认情况下项目会自动选择当前系统最合适的后端：
@@ -551,14 +607,14 @@ git remote set-url origin git@github.com:zmy1213/server.git
 
 ## 后续开发计划
 
-1. 增加多线程 Reactor
-2. 增加连接分发到 worker 线程
-3. 增加定时器和空闲连接回收
-4. 增加 HTTP 协议解析
-5. 增加异步日志
-6. 增加压测脚本
-7. 增加 Linux 百万连接参数调优文档
-8. 增加 Windows AcceptEx 批量异步接收连接
+1. 增加定时器和空闲连接回收
+2. 增加 HTTP 协议解析
+3. 增加异步日志
+4. 增加压测脚本
+5. 增加 Linux 百万连接参数调优文档
+6. 增加 Windows AcceptEx 批量异步接收连接
+7. 增加 GitHub Actions 跨平台构建测试
+8. 增加更大规模并发压测客户端
 
 ## 当前阶段说明
 

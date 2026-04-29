@@ -622,6 +622,49 @@ Buffer 读写
 异常断开
 ```
 
+当前项目状态：这一阶段已经完成第一版自动化测试。
+
+已加入测试入口：
+
+```text
+tests/server_tests.cpp
+```
+
+当前测试覆盖：
+
+```text
+Buffer 基础读写
+真实 TcpServer 单连接 Echo
+真实 TcpServer 64 客户端并发 Echo
+worker_threads=2 的启动和回显
+worker_threads=4 的并发回显
+```
+
+运行方式：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+ctest --test-dir build --output-on-failure
+```
+
+当前本机验证结果：
+
+```text
+默认 macOS kqueue 后端通过
+select 后端通过
+warnings-as-errors 严格构建通过
+```
+
+这轮测试发现并修复了一个 `select` 后端兼容性问题：
+
+```text
+客户端发送数据后 shutdown 写端
+select 会把 EOF 报成可读事件
+如果 Channel 先处理 read，可能先关闭连接，导致待发送数据没有写回客户端
+现在 Channel::handle_event() 改成先处理 write，再处理 read
+```
+
 ## 第 15 阶段：CI/CD
 
 GitHub 上建议加 GitHub Actions。
@@ -798,6 +841,7 @@ Windows IOCP 主干代码
 Echo Server
 EventLoop / Channel / Acceptor / Connection 拆分
 多线程 Reactor 第一版
+自动化功能测试第一版
 高并发原理文档
 流程到代码定位文档
 ```

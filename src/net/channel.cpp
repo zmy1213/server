@@ -77,12 +77,16 @@ void Channel::mark_registered(bool value) noexcept {
 void Channel::handle_event(Event fired_events) {
     // Each callback may close the connection and destroy this Channel. Return
     // immediately after invoking a callback so we never touch a deleted object.
-    if (has_event(fired_events, Event::read) && read_callback_) {
-        read_callback_();
-        return;
-    }
+    //
+    // Write is handled before read because select reports EOF as readable. If a
+    // peer half-closes after sending a request, the socket can stay readable
+    // forever; prioritizing write lets us flush the pending response first.
     if (has_event(fired_events, Event::write) && write_callback_) {
         write_callback_();
+        return;
+    }
+    if (has_event(fired_events, Event::read) && read_callback_) {
+        read_callback_();
         return;
     }
     if (has_event(fired_events, Event::close) && close_callback_) {

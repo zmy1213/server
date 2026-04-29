@@ -890,6 +890,73 @@ Windows 常见限制：
 真正达到百万连接还需要后续压测和系统调优
 ```
 
+## 当前测试验证了什么
+
+这轮加入了第一版自动化功能测试：
+
+```text
+tests/server_tests.cpp
+```
+
+测试做了三件事：
+
+```text
+验证 Buffer 基础读写是否正确
+启动真实 TcpServer 验证单连接 Echo
+启动真实 TcpServer 验证 64 个客户端并发 Echo
+```
+
+运行命令：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+ctest --test-dir build --output-on-failure
+```
+
+当前本机验证结果：
+
+```text
+默认 macOS kqueue 后端通过
+select 后端通过
+warnings-as-errors 严格构建通过
+```
+
+这轮测试还发现了一个很典型的事件顺序问题。
+
+现象：
+
+```text
+select 后端可以 accept 到客户端
+也可以读到客户端发来的数据
+但是客户端收不到服务端回包
+```
+
+原因：
+
+```text
+客户端发完数据后 shutdown 写端
+select 会把这个 EOF 状态也报告成 readable
+如果 Channel 先处理 read，就可能先走关闭逻辑
+已经放进 Buffer 的响应还没来得及 write
+```
+
+修复：
+
+```text
+src/net/channel.cpp
+Channel::handle_event()
+先处理 write 事件，再处理 read 事件
+```
+
+小白理解：
+
+```text
+如果既有“能写回客户端”的事件，又有“客户端不再发数据”的事件
+服务器应该先把已经准备好的响应写回去
+再处理客户端关闭
+```
+
 ## 当前版本还有哪些不足
 
 当前版本是第一阶段高并发骨架，不是最终工业级服务器。
@@ -897,7 +964,6 @@ Windows 常见限制：
 还需要继续补：
 
 ```text
-Linux/macOS 多线程 Reactor
 Windows AcceptEx 异步 accept
 连接超时回收
 异步日志
