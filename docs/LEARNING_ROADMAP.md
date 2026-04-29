@@ -161,6 +161,45 @@ src/net/poller.cpp
 
 当前代码已经有初步封装，但后续要继续拆清楚。
 
+当前项目状态：这一阶段已经完成第一版拆分。
+
+已经新增：
+
+```text
+EventLoop
+Channel
+Acceptor
+Connection
+```
+
+对应文件：
+
+```text
+include/cpp20_server/net/event_loop.h
+src/net/event_loop.cpp
+
+include/cpp20_server/net/channel.h
+src/net/channel.cpp
+
+include/cpp20_server/net/acceptor.h
+src/net/acceptor.cpp
+
+include/cpp20_server/net/connection.h
+src/net/connection.cpp
+```
+
+这一轮拆分的目的：
+
+```text
+TcpServer 不再负责所有细节
+Acceptor 专门接收新连接
+Connection 专门管理单个客户端
+EventLoop 专门处理事件循环
+Channel 专门把 fd 事件转成回调
+```
+
+这为第 5 阶段“多线程 Reactor”打基础。
+
 目标结构：
 
 ```text
@@ -188,6 +227,35 @@ Buffer 只负责数据缓存
 ## 第 5 阶段：多线程 Reactor
 
 单线程事件循环能处理很多连接，但不能充分利用多核 CPU。
+
+当前项目状态：这一阶段已经完成第一版。
+
+已经实现：
+
+```text
+主 EventLoop 负责 Acceptor
+worker EventLoop 负责客户端连接读写
+新连接按轮询分发给 worker EventLoop
+Connection 在所属 worker EventLoop 中创建
+Connection 后续 read/write/close 都在所属 worker 中处理
+```
+
+对应代码：
+
+```text
+include/cpp20_server/net/event_loop.h
+src/net/event_loop.cpp
+src/net/tcp_server.cpp
+```
+
+本阶段新增的关键能力：
+
+```text
+EventLoop::run_in_loop()
+worker EventLoop 线程池
+round-robin 新连接分发
+启动参数 worker_threads
+```
 
 多线程结构：
 
@@ -729,6 +797,7 @@ Linux epoll 后端代码
 Windows IOCP 主干代码
 Echo Server
 EventLoop / Channel / Acceptor / Connection 拆分
+多线程 Reactor 第一版
 高并发原理文档
 流程到代码定位文档
 ```
@@ -736,22 +805,20 @@ EventLoop / Channel / Acceptor / Connection 拆分
 下一步最合理的是：
 
 ```text
-第 5 阶段：多线程 Reactor
+第 7 阶段：定时器和连接超时回收
 ```
 
-也就是把现在的单线程 Reactor 升级成：
+也就是给每个连接记录最后活跃时间，并定期关闭长时间没有读写的死连接：
 
 ```text
-main thread 负责 accept
-worker EventLoop 负责连接读写
-新连接按轮询分发给 worker
-一个连接只属于一个 worker
+连接超时关闭
+心跳检测
+定时任务
 ```
 
-多线程 Reactor 之后，再进入：
+定时器之后，再进入：
 
 ```text
-定时器
 HTTP
 压测
 系统调优

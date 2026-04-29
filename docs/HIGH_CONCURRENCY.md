@@ -133,6 +133,159 @@ include/cpp20_server/net/buffer.h       输出缓冲区
 src/net/buffer.cpp                      缓冲区实现
 ```
 
+## 本轮代码在做什么：Reactor 拆分
+
+这一轮代码是在做“第 4 阶段：封装 Reactor 模型”。
+
+它不是新增 HTTP、定时器、日志这些业务功能，而是把原来集中在 `TcpServer` 里的网络逻辑拆成几个更小的模块。
+
+拆分前，`TcpServer` 同时负责：
+
+```text
+创建监听 socket
+accept 新连接
+等待 epoll/kqueue 事件
+判断 fd 是可读还是可写
+recv() 读取客户端数据
+send() 返回响应
+保存每个连接的状态
+关闭连接并清理资源
+```
+
+这样继续往下写会有一个问题：
+
+```text
+所有逻辑都堆在 TcpServer 里
+后面加多线程、定时器、HTTP、压测时会越来越乱
+```
+
+所以这一轮把非 Windows IOCP 路线拆成：
+
+```text
+TcpServer
+    服务器入口
+    负责创建 EventLoop 和 Acceptor
+    负责保存所有 Connection
+
+EventLoop
+    事件循环
+    内部调用 Poller::wait()
+    把事件分发给 Channel
+
+Channel
+    封装一个 fd
+    保存这个 fd 关心 read/write/close/error 哪些事件
+    事件发生后调用对应回调
+
+Acceptor
+    只负责监听 socket
+    只负责 accept 新连接
+    accept 成功后把 client socket 交给 TcpServer
+
+Connection
+    只负责一个客户端连接
+    负责 recv()
+    负责 send()
+    负责输出 Buffer
+    负责关闭连接
+
+Poller
+    封装 epoll/kqueue/select
+    只负责和操作系统事件通知机制打交道
+```
+
+拆分后的主线变成：
+
+```text
+TcpServer::start()
+        ↓
+创建 Acceptor
+        ↓
+进入 EventLoop::loop()
+        ↓
+Poller::wait() 等待事件
+        ↓
+EventLoop 找到对应 Channel
+        ↓
+Channel 调用回调
+        ↓
+如果是 listen fd 可读：Acceptor::handle_read()
+        ↓
+accept() 得到 client socket
+        ↓
+TcpServer 创建 Connection
+        ↓
+如果是 client fd 可读：Connection::handle_read()
+        ↓
+业务回调生成响应
+        ↓
+Connection::handle_write() 发送响应
+```
+
+这一轮的意义：
+
+```text
+代码职责更清楚
+每个类只做一件主要的事
+为多线程 Reactor 做准备
+以后一个 Connection 可以绑定到某个 EventLoop
+以后 Acceptor 可以只负责接收连接，worker EventLoop 负责读写
+```
+
+## 当前代码在做什么：多线程 Reactor
+
+在 Reactor 拆分之后，项目继续完成了“第 5 阶段：多线程 Reactor”的第一版。
+
+现在 Linux/macOS/select 路线不是所有连接都在一个 `EventLoop` 里处理，而是：
+
+```text
+主 EventLoop
+    负责 Acceptor
+    负责 accept 新连接
+
+worker EventLoop
+    负责客户端连接 read/write/close
+```
+
+新连接进来后的分发方式：
+
+```text
+Acceptor accept 新连接
+        ↓
+TcpServer 按轮询选择 worker EventLoop
+        ↓
+EventLoop::run_in_loop() 投递任务
+        ↓
+worker 线程创建 Connection
+        ↓
+这个 Connection 后续只归这个 worker 管理
+```
+
+对应代码：
+
+| 功能 | 代码位置 | 说明 |
+| --- | --- | --- |
+| `EventLoop` 任务队列 | [`include/cpp20_server/net/event_loop.h`](../include/cpp20_server/net/event_loop.h), [`src/net/event_loop.cpp`](../src/net/event_loop.cpp) | `run_in_loop()` 支持从主 loop 向 worker loop 投递任务 |
+| 启动 worker loop | [`src/net/tcp_server.cpp`](../src/net/tcp_server.cpp) | `start_worker_loops()` 创建多个 `EventLoop` 和线程 |
+| 轮询选择 worker | [`src/net/tcp_server.cpp`](../src/net/tcp_server.cpp) | `next_worker_loop()` 用 round-robin 分发新连接 |
+| 在 worker 中创建连接 | [`src/net/tcp_server.cpp`](../src/net/tcp_server.cpp) | `create_connection()` 在目标 worker loop 里创建 `Connection` |
+
+这个阶段解决的问题：
+
+```text
+单个 EventLoop 只能使用一个 CPU 核
+多线程 Reactor 可以让多个 worker EventLoop 同时处理不同连接
+一个连接固定属于一个 worker，避免多个线程同时读写同一个连接
+```
+
+当前实现还有一个后续优化点：
+
+```text
+EventLoop::run_in_loop() 现在用任务队列加短轮询等待
+后面可以加 eventfd/socketpair 唤醒机制
+这样跨线程投递任务时可以立即唤醒目标 worker
+```
+
 ## 第一步：socket 设置成非阻塞
 
 非阻塞 socket 的意思是：
@@ -754,12 +907,20 @@ HTTP 协议解析
 更完善的错误处理
 ```
 
-尤其是 Linux/macOS 当前还是单线程 Reactor。单线程也可以处理很多连接，但要更好利用多核 CPU，需要升级为：
+Linux/macOS 当前已经有多线程 Reactor 第一版：
 
 ```text
 主线程负责 accept
 多个 worker EventLoop 负责连接读写
 每个连接固定绑定一个 worker
+```
+
+后续还需要继续补：
+
+```text
+EventLoop 跨线程唤醒机制
+连接定时器
+更完整的多线程压测
 ```
 
 ## 一句话总结

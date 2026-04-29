@@ -5,7 +5,10 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
+#include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace cpp20_server::net {
 
@@ -15,6 +18,8 @@ class Channel;
 // Linux/macOS use this Reactor loop. Windows IOCP has a separate Proactor path.
 class EventLoop {
 public:
+    using Task = std::function<void()>;
+
     explicit EventLoop(std::size_t max_events = 4096);
     ~EventLoop();
 
@@ -23,6 +28,7 @@ public:
 
     void loop();
     void stop() noexcept;
+    void run_in_loop(Task task);
 
     void update_channel(Channel& channel);
     void remove_channel(Channel& channel);
@@ -30,8 +36,12 @@ public:
     [[nodiscard]] const char* backend_name() const noexcept;
 
 private:
+    void process_pending_tasks();
+
     Poller poller_;
     std::unordered_map<socket_t, Channel*> channels_;
+    std::mutex pending_mutex_;
+    std::vector<Task> pending_tasks_;
     std::atomic_bool stopping_{false};
 };
 

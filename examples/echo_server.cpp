@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -24,6 +25,14 @@ std::uint16_t parse_port(const char* value) {
     return static_cast<std::uint16_t>(port);
 }
 
+std::size_t parse_worker_threads(const char* value) {
+    const long count = std::strtol(value, nullptr, 10);
+    if (count < 0) {
+        throw std::runtime_error("worker_threads must be greater than or equal to 0");
+    }
+    return static_cast<std::size_t>(count);
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -34,6 +43,9 @@ int main(int argc, char* argv[]) {
         }
         if (argc >= 3) {
             options.port = parse_port(argv[2]);
+        }
+        if (argc >= 4) {
+            options.worker_threads = parse_worker_threads(argv[3]);
         }
 
         cpp20_server::net::TcpServer server{options};

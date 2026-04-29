@@ -391,10 +391,12 @@ class TcpServer::Impl {
 public:
     explicit Impl(TcpServerOptions options)
         : options_(std::move(options)),
-          loop_(options_.max_events),
+          accept_loop_(options_.max_events),
           on_message_([](std::string_view message) { return std::string{message}; }) {}
 
     ~Impl() {
+        stop();
+        join_worker_loops();
         close_all_connections();
         acceptor_.reset();
     }
@@ -404,19 +406,28 @@ public:
     }
 
     void start() {
-        acceptor_ = std::make_unique<Acceptor>(loop_, options_.host, options_.port, options_.backlog);
+        start_worker_loops();
+
+        acceptor_ = std::make_unique<Acceptor>(accept_loop_, options_.host, options_.port, options_.backlog);
         acceptor_->set_new_connection_callback([this](socket_t client_fd) {
             handle_new_connection(client_fd);
         });
 
         std::cout << "listening on " << options_.host << ':' << options_.port
-                  << " backend=" << backend_name() << '\n';
+                  << " backend=" << backend_name()
+                  << " worker_threads=" << worker_loops_.size() << '\n';
 
-        loop_.loop();
+        accept_loop_.loop();
+        join_worker_loops();
     }
 
     void stop() noexcept {
-        loop_.stop();
+        accept_loop_.stop();
+        for (auto& loop : worker_loops_) {
+            if (loop) {
+                loop->stop();
+            }
+        }
     }
 
     [[nodiscard]] const TcpServerOptions& options() const noexcept {
@@ -428,17 +439,63 @@ public:
     }
 
     [[nodiscard]] const char* backend_name() const noexcept {
-        return loop_.backend_name();
+        return accept_loop_.backend_name();
     }
 
 private:
+    void start_worker_loops() {
+        if (!worker_loops_.empty()) {
+            return;
+        }
+
+        const auto hardware_threads = std::thread::hardware_concurrency();
+        const std::size_t worker_count = options_.worker_threads == 0
+                                             ? static_cast<std::size_t>(std::max(1U, hardware_threads))
+                                             : options_.worker_threads;
+
+        worker_loops_.reserve(worker_count);
+        worker_threads_.reserve(worker_count);
+        for (std::size_t i = 0; i < worker_count; ++i) {
+            auto loop = std::make_unique<EventLoop>(options_.max_events);
+            auto* raw_loop = loop.get();
+            worker_loops_.push_back(std::move(loop));
+            worker_threads_.emplace_back([raw_loop] {
+                raw_loop->loop();
+            });
+        }
+    }
+
+    void join_worker_loops() {
+        for (auto& thread : worker_threads_) {
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+        worker_threads_.clear();
+    }
+
+    EventLoop& next_worker_loop() {
+        auto& loop = *worker_loops_[next_worker_index_ % worker_loops_.size()];
+        ++next_worker_index_;
+        return loop;
+    }
+
     void handle_new_connection(socket_t client_fd) {
-        auto connection = std::make_unique<Connection>(loop_, client_fd);
+        auto& target_loop = next_worker_loop();
+        target_loop.run_in_loop([this, &target_loop, client_fd] {
+            create_connection(target_loop, client_fd);
+        });
+    }
+
+    void create_connection(EventLoop& loop, socket_t client_fd) {
+        auto connection = std::make_unique<Connection>(loop, client_fd);
         connection->set_message_callback(on_message_);
         connection->set_bytes_read_callback([this](std::size_t bytes) {
+            std::scoped_lock lock(stats_mutex_);
             stats_.bytes_read += static_cast<std::uint64_t>(bytes);
         });
         connection->set_bytes_written_callback([this](std::size_t bytes) {
+            std::scoped_lock lock(stats_mutex_);
             stats_.bytes_written += static_cast<std::uint64_t>(bytes);
         });
         connection->set_close_callback([this](socket_t fd) {
@@ -446,34 +503,53 @@ private:
         });
 
         auto* raw = connection.get();
-        connections_.emplace(client_fd, std::move(connection));
-        ++stats_.accepted_connections;
-        stats_.active_connections = static_cast<std::uint64_t>(connections_.size());
+        {
+            std::scoped_lock lock(connections_mutex_);
+            connections_.emplace(client_fd, std::move(connection));
+            ++stats_.accepted_connections;
+            stats_.active_connections = static_cast<std::uint64_t>(connections_.size());
+        }
         raw->start();
     }
 
     void close_connection(socket_t fd) noexcept {
-        auto it = connections_.find(fd);
-        if (it == connections_.end()) {
-            return;
+        std::unique_ptr<Connection> connection;
+        {
+            std::scoped_lock lock(connections_mutex_);
+            auto it = connections_.find(fd);
+            if (it == connections_.end()) {
+                return;
+            }
+            connection = std::move(it->second);
+            connections_.erase(it);
+            stats_.active_connections = static_cast<std::uint64_t>(connections_.size());
         }
-        it->second->close();
-        connections_.erase(it);
-        stats_.active_connections = static_cast<std::uint64_t>(connections_.size());
+
+        connection->close();
     }
 
     void close_all_connections() noexcept {
-        for (auto& [_, connection] : connections_) {
+        std::unordered_map<socket_t, std::unique_ptr<Connection>> connections;
+        {
+            std::scoped_lock lock(connections_mutex_);
+            connections.swap(connections_);
+            stats_.active_connections = 0;
+        }
+
+        for (auto& [_, connection] : connections) {
             connection->close();
         }
-        connections_.clear();
-        stats_.active_connections = 0;
     }
 
     SocketRuntime runtime_;
     TcpServerOptions options_;
-    EventLoop loop_;
+    EventLoop accept_loop_;
     std::unique_ptr<Acceptor> acceptor_;
+    std::vector<std::unique_ptr<EventLoop>> worker_loops_;
+    std::vector<std::thread> worker_threads_;
+    std::size_t next_worker_index_{0};
+    std::mutex connections_mutex_;
+    mutable std::mutex stats_mutex_;
     std::unordered_map<socket_t, std::unique_ptr<Connection>> connections_;
     MessageCallback on_message_;
     ServerStats stats_;

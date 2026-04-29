@@ -200,7 +200,107 @@ warnings-as-errors 严格构建通过
 100 并发 echo 测试通过
 ```
 
-下一步建议进入第 5 阶段：多线程 Reactor。
+第 4 阶段已经完成第一版拆分；下一轮已经继续进入第 5 阶段：多线程 Reactor。
+
+## 最新代码说明：多线程 Reactor
+
+这一轮代码把 Linux/macOS/select 路线从“单线程 Reactor”升级成了“多线程 Reactor”。
+
+现在的线程分工是：
+
+```text
+主 EventLoop
+    负责 Acceptor
+    负责监听 listen socket
+    负责 accept 新连接
+
+worker EventLoop 1
+    负责一部分客户端连接的 read/write
+
+worker EventLoop 2
+    负责另一部分客户端连接的 read/write
+
+worker EventLoop N
+    负责另一部分客户端连接的 read/write
+```
+
+新连接分发方式：
+
+```text
+第 1 个连接 -> worker 1
+第 2 个连接 -> worker 2
+第 3 个连接 -> worker 3
+...
+按轮询分发
+```
+
+核心原则：
+
+```text
+一个 Connection 只属于一个 worker EventLoop
+读写事件都在这个 worker EventLoop 里处理
+减少多个线程同时操作同一个连接的风险
+```
+
+这次主要修改：
+
+```text
+EventLoop 增加 run_in_loop() 任务队列
+TcpServer 增加 worker EventLoop 线程池
+新连接由主 EventLoop 接收
+新连接按轮询投递给 worker EventLoop
+Connection 在 worker EventLoop 中创建、读写、关闭
+```
+
+多线程 Reactor 当前流程：
+
+```text
+Acceptor accept 新连接
+        ↓
+TcpServer 选择一个 worker EventLoop
+        ↓
+worker EventLoop::run_in_loop()
+        ↓
+在 worker 线程里创建 Connection
+        ↓
+Connection 注册读事件
+        ↓
+worker EventLoop 负责这个连接后续 read/write
+```
+
+启动时可以指定 worker 数量：
+
+```bash
+./build/echo_server 0.0.0.0 8080 4
+```
+
+参数含义：
+
+```text
+第 1 个参数：监听地址
+第 2 个参数：监听端口
+第 3 个参数：worker_threads，0 表示自动使用 CPU 核数
+```
+
+如果不传第 3 个参数，默认是：
+
+```text
+worker_threads=0
+自动使用 std::thread::hardware_concurrency()
+```
+
+当前验证结果：
+
+```text
+默认 kqueue 构建通过
+select 后端构建通过
+warnings-as-errors 严格构建通过
+启动时显示 worker_threads=8
+单连接 echo 测试通过
+200 并发 echo 测试通过
+```
+
+下一步建议进入第 7 阶段前的准备：先补定时器和连接超时回收。
 
 如果你想先理解为什么这种结构能支撑高并发，可以先看：
 
@@ -269,6 +369,12 @@ cmake --build build --config Release
 ./build/echo_server 0.0.0.0 8080
 ```
 
+指定 worker 线程数：
+
+```bash
+./build/echo_server 0.0.0.0 8080 4
+```
+
 本机测试：
 
 ```bash
@@ -311,6 +417,12 @@ cmake --build build --config Release
 
 ```powershell
 .\build\Release\echo_server.exe 0.0.0.0 8080
+```
+
+指定 worker 线程数：
+
+```powershell
+.\build\Release\echo_server.exe 0.0.0.0 8080 4
 ```
 
 如果使用单配置生成器，比如 MinGW，也可能是：
