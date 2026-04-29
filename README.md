@@ -92,6 +92,116 @@ tcp_server   TCP 服务器入口，Windows IOCP 也在这里实现
 examples     示例程序
 ```
 
+## 本轮代码说明：Reactor 拆分
+
+这一轮代码主要是在做第 4 阶段：把原来集中在 `TcpServer` 里的网络逻辑，拆成更清晰的 Reactor 组件。
+
+简单说，这一轮不是新增复杂业务，而是在整理服务器骨架，让后面更容易继续做：
+
+```text
+多线程 Reactor
+定时器
+HTTP 协议
+压测
+百万连接优化
+```
+
+拆分前，`TcpServer` 同时负责：
+
+```text
+监听端口
+accept 新连接
+处理 epoll/kqueue 事件
+读取客户端数据
+发送响应数据
+关闭连接
+保存连接状态
+```
+
+这样继续往下写会越来越乱。
+
+拆分后，职责变成：
+
+```text
+TcpServer     服务器入口，负责组装各个模块
+EventLoop     事件循环，负责等待和分发事件
+Channel       fd 事件封装，负责把可读/可写事件转成回调
+Acceptor      监听 socket，专门负责 accept 新连接
+Connection    单个客户端连接，负责 recv/send/close
+Buffer        保存还没发送完的数据
+Poller        封装 epoll/kqueue/select
+```
+
+现在 Linux/macOS/select 路线的代码流程是：
+
+```text
+main()
+  ↓
+TcpServer::start()
+  ↓
+创建 Acceptor
+  ↓
+Acceptor 监听 listen socket
+  ↓
+EventLoop::loop()
+  ↓
+Poller::wait()
+  ↓
+Channel::handle_event()
+  ↓
+如果是新连接：Acceptor::handle_read()
+  ↓
+创建 Connection
+  ↓
+如果客户端发数据：Connection::handle_read()
+  ↓
+业务回调生成响应
+  ↓
+写入 Buffer
+  ↓
+Connection::handle_write()
+  ↓
+send() 返回给客户端
+```
+
+这一轮新增的主要文件：
+
+```text
+include/cpp20_server/net/event_loop.h
+src/net/event_loop.cpp
+
+include/cpp20_server/net/channel.h
+src/net/channel.cpp
+
+include/cpp20_server/net/acceptor.h
+src/net/acceptor.cpp
+
+include/cpp20_server/net/connection.h
+src/net/connection.cpp
+```
+
+这一轮修改后的意义：
+
+```text
+代码职责更清楚
+TcpServer 不再什么都管
+后面可以更自然地加入多个 EventLoop
+每个连接可以绑定到某个 EventLoop
+为多线程 Reactor 打基础
+```
+
+当前验证结果：
+
+```text
+默认 kqueue 构建通过
+select 后端构建通过
+warnings-as-errors 严格构建通过
+单连接 echo 测试通过
+100 并发 echo 测试通过
+```
+
+下一步建议进入第 5 阶段：多线程 Reactor。
+
 如果你想先理解为什么这种结构能支撑高并发，可以先看：
 
 ```text
