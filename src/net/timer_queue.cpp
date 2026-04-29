@@ -4,40 +4,57 @@
 
 namespace cpp20_server::net {
 
-void TimerQueue::run_after(std::chrono::milliseconds delay, Callback callback) {
+TimerQueue::TimerId TimerQueue::run_after(std::chrono::milliseconds delay, Callback callback) {
     if (!callback) {
-        return;
+        return 0;
     }
 
     if (delay < std::chrono::milliseconds{0}) {
         delay = std::chrono::milliseconds{0};
     }
 
+    const TimerId id = next_timer_id_++;
+    active_.insert(id);
     push_timer(Timer{
         Clock::now() + delay,
         std::chrono::milliseconds{0},
         next_sequence_++,
+        id,
         std::move(callback),
         false,
     });
+    return id;
 }
 
-void TimerQueue::run_every(std::chrono::milliseconds interval, Callback callback) {
+TimerQueue::TimerId TimerQueue::run_every(std::chrono::milliseconds interval, Callback callback) {
     if (!callback) {
-        return;
+        return 0;
     }
 
     if (interval <= std::chrono::milliseconds{0}) {
         interval = std::chrono::milliseconds{1};
     }
 
+    const TimerId id = next_timer_id_++;
+    active_.insert(id);
     push_timer(Timer{
         Clock::now() + interval,
         interval,
         next_sequence_++,
+        id,
         std::move(callback),
         true,
     });
+    return id;
+}
+
+void TimerQueue::cancel(TimerId id) {
+    if (id == 0) {
+        return;
+    }
+    if (active_.find(id) != active_.end()) {
+        cancelled_.insert(id);
+    }
 }
 
 std::chrono::milliseconds TimerQueue::next_timeout(std::chrono::milliseconds fallback) const {
@@ -66,13 +83,20 @@ void TimerQueue::run_due_timers() {
     }
 
     for (auto& timer : due) {
+        if (cancelled_.erase(timer.id) > 0) {
+            active_.erase(timer.id);
+            continue;
+        }
         if (timer.callback) {
             timer.callback();
         }
-        if (timer.repeat) {
+        if (timer.repeat && cancelled_.find(timer.id) == cancelled_.end()) {
             timer.expires_at = Clock::now() + timer.interval;
             timer.sequence = next_sequence_++;
             push_timer(std::move(timer));
+        } else {
+            cancelled_.erase(timer.id);
+            active_.erase(timer.id);
         }
     }
 }

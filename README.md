@@ -32,8 +32,9 @@ docs/BENCHMARK.md
 - 提供 Echo Server 示例
 - 提供 HTTP Server 示例
 - 支持最小 HTTP 请求解析和响应生成
-- 支持小根堆定时器
+- 支持小根堆定时器和定时器取消
 - 支持空闲连接超时关闭
+- 支持 HTTP 路由表注册回调
 - 支持简单 `key=value` 配置文件
 - 支持异步日志
 - 支持运行指标文本和 Prometheus 风格输出
@@ -369,6 +370,7 @@ idle_timeout_seconds>0  连接空闲超过这个秒数后关闭
 TimerQueue
     使用小根堆保存定时任务
     最早过期的任务永远在堆顶
+    返回 TimerId，支持 cancel(timer_id) 取消未执行的任务
 
 EventLoop
     每轮循环检查到期定时器
@@ -393,6 +395,16 @@ include/cpp20_server/net/connection.h
 src/net/connection.cpp
 src/net/tcp_server.cpp
 ```
+
+这一轮改进：
+
+```text
+TimerQueue::run_after() / run_every() 现在会返回 TimerId
+TimerQueue::cancel(TimerId) 可以取消未执行的定时器
+EventLoop 暴露 cancel_timer(TimerId)
+```
+
+注意：当前取消语义是“协作式取消”。如果回调已经开始执行，就不会强行中断正在执行的 C++ 代码，而是保证还没执行的定时器不会再执行。
 
 启动时指定空闲超时：
 
@@ -577,6 +589,8 @@ GET  /health  返回 ok
 POST /echo    返回请求 body
 其他路径       返回 404
 ```
+
+当前路由已经封装成 `HttpRouter`，可以用 `method + path` 注册不同回调，后续加新接口不需要继续堆很多 `if/else`。
 
 相关代码：
 
@@ -1048,7 +1062,8 @@ git remote set-url origin git@github.com:zmy1213/server.git
 
 1. 增加 Linux 百万连接参数调优文档
 2. 增加 Windows AcceptEx 批量异步接收连接
-3. 增加 GitHub Actions 跨平台构建测试
+3. 增加 C++ HTTP Client 和异步 connect
+4. 增加 GitHub Actions 跨平台构建测试
 
 ## 当前阶段说明
 

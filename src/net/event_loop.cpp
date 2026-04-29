@@ -42,16 +42,16 @@ void EventLoop::run_in_loop(Task task) {
     pending_tasks_.push_back(std::move(task));
 }
 
-void EventLoop::run_after(std::chrono::milliseconds delay, Task task) {
-    run_in_loop([this, delay, task = std::move(task)]() mutable {
-        timer_queue_.run_after(delay, std::move(task));
-    });
+EventLoop::TimerId EventLoop::run_after(std::chrono::milliseconds delay, Task task) {
+    return timer_queue_.run_after(delay, std::move(task));
 }
 
-void EventLoop::run_every(std::chrono::milliseconds interval, Task task) {
-    run_in_loop([this, interval, task = std::move(task)]() mutable {
-        timer_queue_.run_every(interval, std::move(task));
-    });
+EventLoop::TimerId EventLoop::run_every(std::chrono::milliseconds interval, Task task) {
+    return timer_queue_.run_every(interval, std::move(task));
+}
+
+void EventLoop::cancel_timer(TimerId id) {
+    timer_queue_.cancel(id);
 }
 
 void EventLoop::update_channel(Channel& channel) {

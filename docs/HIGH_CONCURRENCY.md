@@ -915,6 +915,7 @@ EventLoop 安排一个定时检查任务
 | --- | --- | --- |
 | 小根堆定时器 | [`include/cpp20_server/net/timer_queue.h`](../include/cpp20_server/net/timer_queue.h), [`src/net/timer_queue.cpp`](../src/net/timer_queue.cpp) | 保存定时任务，最早过期的任务先执行 |
 | EventLoop 执行定时器 | [`src/net/event_loop.cpp`](../src/net/event_loop.cpp) | 每轮事件循环前后执行到期定时器，并用最近定时器调整等待时间 |
+| 定时器取消 | [`include/cpp20_server/net/timer_queue.h`](../include/cpp20_server/net/timer_queue.h), [`src/net/timer_queue.cpp`](../src/net/timer_queue.cpp) | `TimerId` + `cancel()` 取消还没执行的任务 |
 | 连接活跃时间 | [`include/cpp20_server/net/connection.h`](../include/cpp20_server/net/connection.h), [`src/net/connection.cpp`](../src/net/connection.cpp) | 每次读写成功后刷新 `last_active_at` |
 | 空闲超时配置 | [`include/cpp20_server/net/tcp_server.h`](../include/cpp20_server/net/tcp_server.h) | `idle_timeout_seconds=0` 表示不启用 |
 | Reactor 空闲关闭 | [`src/net/tcp_server.cpp`](../src/net/tcp_server.cpp) | 定时检查连接是否空闲太久 |
@@ -966,7 +967,7 @@ POST /echo
 | HTTP 请求结构 | [`include/cpp20_server/protocol/http.h`](../include/cpp20_server/protocol/http.h) | `HttpRequest` 保存 method、path、version、headers、body |
 | HTTP 请求解析 | [`src/protocol/http.cpp`](../src/protocol/http.cpp) | `parse_http_request()` 解析请求行、Header 和 Body |
 | HTTP 响应生成 | [`src/protocol/http.cpp`](../src/protocol/http.cpp) | `make_http_response()` 生成状态行、Header 和 Body |
-| 示例 HTTP 路由 | [`src/protocol/http.cpp`](../src/protocol/http.cpp) | `handle_demo_http_request()` 处理 `/`、`/health`、`/echo` |
+| 示例 HTTP 路由 | [`include/cpp20_server/protocol/http.h`](../include/cpp20_server/protocol/http.h), [`src/protocol/http.cpp`](../src/protocol/http.cpp) | `HttpRouter` 用 map 注册 method + path 到回调 |
 | HTTP Server 示例 | [`examples/http_server.cpp`](../examples/http_server.cpp) | 使用 `TcpServer` 承载 HTTP 协议层 |
 
 小白理解：
@@ -975,6 +976,18 @@ POST /echo
 TcpServer 负责网络收发
 HTTP 模块负责看懂这些字节是什么意思
 业务代码根据 path 决定返回什么
+```
+
+当前示例路由已经从硬编码 `if/else` 改成 `HttpRouter`：
+
+```text
+GET /health
+        ↓
+HttpRouter 查找 "GET /health"
+        ↓
+找到注册的回调
+        ↓
+回调生成 HTTP Response
 ```
 
 当前 HTTP 仍然是教学版最小实现，但已经接入连接输入缓冲区，可以处理请求分多次到达、多个请求粘在一起到达、同一个连接连续发送多个请求这些基础字节流问题。

@@ -21,6 +21,7 @@ class Channel;
 class EventLoop {
 public:
     using Task = std::function<void()>;
+    using TimerId = TimerQueue::TimerId;
 
     explicit EventLoop(std::size_t max_events = 4096);
     ~EventLoop();
@@ -31,8 +32,9 @@ public:
     void loop();
     void stop() noexcept;
     void run_in_loop(Task task);
-    void run_after(std::chrono::milliseconds delay, Task task);
-    void run_every(std::chrono::milliseconds interval, Task task);
+    TimerId run_after(std::chrono::milliseconds delay, Task task);
+    TimerId run_every(std::chrono::milliseconds interval, Task task);
+    void cancel_timer(TimerId id);
 
     void update_channel(Channel& channel);
     void remove_channel(Channel& channel);

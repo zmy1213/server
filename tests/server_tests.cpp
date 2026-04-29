@@ -60,6 +60,7 @@ using cpp20_server::net::last_socket_error;
 using cpp20_server::net::socket_t;
 using cpp20_server::protocol::handle_demo_http_request;
 using cpp20_server::protocol::handle_demo_http_stream;
+using cpp20_server::protocol::HttpRouter;
 using cpp20_server::protocol::make_http_response;
 using cpp20_server::protocol::parse_http_request;
 using cpp20_server::protocol::try_parse_http_request;
@@ -403,6 +404,7 @@ void test_timer_queue() {
     TimerQueue timers;
     int one_shot_count = 0;
     int repeat_count = 0;
+    int cancelled_count = 0;
 
     timers.run_after(std::chrono::milliseconds{0}, [&one_shot_count] {
         ++one_shot_count;
@@ -418,6 +420,21 @@ void test_timer_queue() {
     std::this_thread::sleep_for(std::chrono::milliseconds{2});
     timers.run_due_timers();
     expect(repeat_count >= 2, "repeat timer should fire more than once");
+
+    const auto cancelled = timers.run_after(std::chrono::milliseconds{0}, [&cancelled_count] {
+        ++cancelled_count;
+    });
+    timers.cancel(cancelled);
+    timers.run_due_timers();
+    expect(cancelled_count == 0, "cancelled one-shot timer should not fire");
+
+    const auto repeat = timers.run_every(std::chrono::milliseconds{1}, [&cancelled_count] {
+        ++cancelled_count;
+    });
+    timers.cancel(repeat);
+    std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    timers.run_due_timers();
+    expect(cancelled_count == 0, "cancelled repeat timer should not fire");
 }
 
 void test_buffer() {
@@ -568,6 +585,15 @@ void test_http_response_routes() {
     const std::string raw_response = make_http_response(201, "Created", "created\n");
     expect(raw_response.find("Content-Length: 8\r\n") != std::string::npos,
            "http response should include content length");
+
+    HttpRouter router;
+    router.add_route("GET", "/custom", [](const cpp20_server::protocol::HttpRequest&) {
+        return make_http_response(200, "OK", "custom\n");
+    });
+    const auto custom = parse_http_request("GET /custom HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(custom.has_value(), "custom route request should parse");
+    expect(router.handle(*custom).find("\r\n\r\ncustom\n") != std::string::npos,
+           "http router should dispatch custom registered route");
 }
 
 void test_single_connection_echo() {

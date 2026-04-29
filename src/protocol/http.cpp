@@ -132,18 +132,49 @@ std::string make_http_response(int status_code,
     return response.str();
 }
 
-std::string handle_demo_http_request(const HttpRequest& request) {
-    if (request.method == "GET" && request.path == "/") {
-        return make_http_response(200, "OK", "hello http\n");
+void HttpRouter::add_route(std::string method, std::string path, HttpHandler handler) {
+    if (!handler) {
+        return;
     }
-    if (request.method == "GET" && request.path == "/health") {
-        return make_http_response(200, "OK", "ok\n");
-    }
-    if (request.method == "POST" && request.path == "/echo") {
-        return make_http_response(200, "OK", request.body);
-    }
+    routes_[make_key(method, path)] = std::move(handler);
+}
 
+std::string HttpRouter::handle(const HttpRequest& request) const {
+    const auto it = routes_.find(make_key(request.method, request.path));
+    if (it != routes_.end()) {
+        return it->second(request);
+    }
     return make_http_response(404, "Not Found", "not found\n");
+}
+
+std::string HttpRouter::make_key(std::string_view method, std::string_view path) {
+    std::string key;
+    key.reserve(method.size() + 1 + path.size());
+    key.append(method);
+    key.push_back(' ');
+    key.append(path);
+    return key;
+}
+
+const HttpRouter& demo_http_router() {
+    static const HttpRouter router = [] {
+        HttpRouter value;
+        value.add_route("GET", "/", [](const HttpRequest&) {
+            return make_http_response(200, "OK", "hello http\n");
+        });
+        value.add_route("GET", "/health", [](const HttpRequest&) {
+            return make_http_response(200, "OK", "ok\n");
+        });
+        value.add_route("POST", "/echo", [](const HttpRequest& request) {
+            return make_http_response(200, "OK", request.body);
+        });
+        return value;
+    }();
+    return router;
+}
+
+std::string handle_demo_http_request(const HttpRequest& request) {
+    return demo_http_router().handle(request);
 }
 
 std::string handle_demo_http_request(std::string_view raw_request) {
