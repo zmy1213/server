@@ -10,10 +10,11 @@
 https://github.com/zmy1213/server
 ```
 
-原理文档：
+文档：
 
 ```text
 docs/HIGH_CONCURRENCY.md
+docs/LEARNING_ROADMAP.md
 ```
 
 ## 当前功能
@@ -50,7 +51,8 @@ docs/HIGH_CONCURRENCY.md
 ├── CMakeLists.txt
 ├── README.md
 ├── docs/
-│   └── HIGH_CONCURRENCY.md
+│   ├── HIGH_CONCURRENCY.md
+│   └── LEARNING_ROADMAP.md
 ├── examples/
 │   └── echo_server.cpp
 ├── include/
@@ -82,6 +84,12 @@ examples    示例程序
 
 ```text
 docs/HIGH_CONCURRENCY.md
+```
+
+如果你想按阶段从小白开始实现完整服务器，可以看：
+
+```text
+docs/LEARNING_ROADMAP.md
 ```
 
 ## 小白先看：epoll / kqueue / IOCP 是什么
